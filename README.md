@@ -1,3 +1,4 @@
+<img width="2436" height="1281" alt="image" src="https://github.com/user-attachments/assets/5b08cc03-af0c-4269-9ffa-b39a82747f03" />
 ﻿# 直绑独立服务
 
 该目录是独立的 5601 服务：
