@@ -87,11 +87,15 @@ class BatchErrorClassificationTests(unittest.TestCase):
             barrier.wait()
             return {"success": True}
 
-        results = run_batch_impl(
-            count=10,
-            workers=10,
-            run_email_func=run_email,
-        )
+        with patch(
+            "sms_tool.batch_runner.CFG",
+            {"email_registration": {"sentinel_prewarm_window": 0}},
+        ):
+            results = run_batch_impl(
+                count=10,
+                workers=10,
+                run_email_func=run_email,
+            )
 
         self.assertEqual(len(results), 10)
         self.assertTrue(all(result["success"] for result in results))
