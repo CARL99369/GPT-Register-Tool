@@ -21,3 +21,5 @@ class MailboxAccount:
     price: str = ""
     purchase_total_cost: str = ""
     balance_after: str = ""
+    inbox_url: str = ""
+    seen_message_ids: tuple[str, ...] = ()

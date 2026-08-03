@@ -314,6 +314,28 @@ class RegistrationConcurrencyTests(unittest.TestCase):
 
         self.assertEqual(records, [])
 
+    def test_chatai_parser_accepts_url_html_mailbox_and_preserves_delimiter_in_url(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "mailboxes.txt"
+            url = "https://mail.example.test/messages/key/user%40icloud.com?marker=a----b"
+            path.write_text(f"User@iCloud.com----{url}\n", encoding="utf-8")
+
+            records = _parse_chatai_mailbox_file(path)
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].email, "user@icloud.com")
+        self.assertEqual(records[0].provider, "url_html")
+        self.assertEqual(records[0].inbox_url, url)
+
+    def test_chatai_parser_rejects_non_http_two_field_mailbox(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "mailboxes.txt"
+            path.write_text("user@icloud.com----file:///tmp/mail.html\n", encoding="utf-8")
+
+            records = _parse_chatai_mailbox_file(path)
+
+        self.assertEqual(records, [])
+
     def test_chatai_parser_accepts_refresh_token_before_uuid_client_id(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "mailboxes.txt"

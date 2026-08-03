@@ -1,5 +1,6 @@
 import re
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from .mailbox_types import MailboxAccount
 
@@ -84,6 +85,33 @@ def _parse_chongzhi_line(line, source_path, line_no):
         source=str(source_path),
         provider="chongzhi",
         token=client_id,
+    )
+
+
+def _parse_url_html_line(line, source_path, line_no):
+    email_text, separator, inbox_url = str(line or "").partition("----")
+    if not separator:
+        return None
+    email = _normalize_mailbox_email(email_text)
+    inbox_url = inbox_url.strip()
+    try:
+        parsed_url = urlsplit(inbox_url)
+        hostname = parsed_url.hostname
+    except ValueError:
+        hostname = None
+        parsed_url = None
+    if (
+        not email
+        or parsed_url is None
+        or parsed_url.scheme.lower() not in {"http", "https"}
+        or not hostname
+    ):
+        return None
+    return MailboxAccount(
+        email=email.lower(),
+        source=str(source_path),
+        provider="url_html",
+        inbox_url=inbox_url,
     )
 
 
@@ -297,6 +325,10 @@ def _parse_chatai_mailbox_file(path):
                 records.append(account)
             continue
         if "----" in line:
+            account = _parse_url_html_line(line, chatai_path, line_no)
+            if account:
+                records.append(account)
+                continue
             parts = line.split("----", 3)
             if len(parts) < 4:
                 print(f"[!] Skip malformed chatai line {chatai_path}:{line_no}")
