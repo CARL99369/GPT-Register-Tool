@@ -145,8 +145,9 @@ class PaymentLinkManagerTests(unittest.TestCase):
     def test_direct_card_requires_checkout_proxy_before_subprocess(self):
         with tempfile.TemporaryDirectory() as tmp:
             with patch.object(manager, "_state_path", return_value=Path(tmp) / "runs.jsonl"):
-                with patch("sms_tool.payment_link_manager.subprocess.run") as run:
-                    result = manager.generate_payment_link("token", payment_method="direct_card")
+                with patch.object(manager, "_protocol_cfg", return_value={"methods": {"direct_card": {}}}):
+                    with patch("sms_tool.payment_link_manager.subprocess.run") as run:
+                        result = manager.generate_payment_link("token", payment_method="direct_card")
         self.assertFalse(result["ok"])
         self.assertIn("proxy", result["error"].lower())
         run.assert_not_called()
