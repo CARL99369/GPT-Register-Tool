@@ -67,6 +67,72 @@ class RecordSeedFailureTests(unittest.TestCase):
         self.assertEqual(kakao.record_seed_failure(_SEED, reason), "removed")
 
 
+class ProxyDerivationTests(unittest.TestCase):
+    def test_all_kr_fixed_proxy_reuses_seed_without_country_selector(self):
+        seed = "socks5h://customer-sessid-demo123:pass@gw.example:9999"
+        with (
+            patch.object(kakao, "CHECKOUT_COUNTRY", "KR"),
+            patch.object(kakao, "PROMOTION_COUNTRY", "KR"),
+            patch.object(kakao, "PROVIDER_COUNTRY", "KR"),
+        ):
+            chain = kakao.kakao_proxy_chain(seed)
+
+        normalized = kakao.normalize_proxy_url(seed)
+        self.assertEqual(chain, (normalized, normalized, normalized))
+
+    def test_all_kr_sessid_with_natural_uppercase_suffix_is_unchanged(self):
+        seed = "socks5h://customer-country-kr-sessid-demoON:pass@gw.example:9999"
+        with (
+            patch.object(kakao, "CHECKOUT_COUNTRY", "KR"),
+            patch.object(kakao, "PROMOTION_COUNTRY", "KR"),
+            patch.object(kakao, "PROVIDER_COUNTRY", "KR"),
+        ):
+            chain = kakao.kakao_proxy_chain(seed)
+
+        normalized = kakao.normalize_proxy_url(seed)
+        self.assertEqual(chain, (normalized, normalized, normalized))
+
+    def test_cross_country_sessid_derivation_preserves_seed_identity(self):
+        seed = "socks5h://customer-country-kr-sessid-demoON:pass@gw.example:9999"
+        with (
+            patch.object(kakao, "CHECKOUT_COUNTRY", "KR"),
+            patch.object(kakao, "PROMOTION_COUNTRY", "VN"),
+            patch.object(kakao, "PROVIDER_COUNTRY", "KR"),
+        ):
+            checkout, promotion, provider = kakao.kakao_proxy_chain(seed)
+
+        self.assertEqual(checkout, kakao.normalize_proxy_url(seed))
+        self.assertEqual(provider, kakao.normalize_proxy_url(seed))
+        decoded = kakao.unquote(promotion)
+        self.assertIn("country-vn", decoded)
+        self.assertIn("sessid-demoONVN", decoded)
+        self.assertEqual(
+            kakao.proxy_chain_key(seed),
+            kakao.proxy_chain_key(promotion, derived_country="VN"),
+        )
+
+    def test_cross_country_legacy_sid_derivation_remains_supported(self):
+        seed = "socks5h://customer-country-kr-sid-demo123:pass@gw.example:9999"
+        with (
+            patch.object(kakao, "CHECKOUT_COUNTRY", "KR"),
+            patch.object(kakao, "PROMOTION_COUNTRY", "VN"),
+            patch.object(kakao, "PROVIDER_COUNTRY", "KR"),
+        ):
+            _, promotion, _ = kakao.kakao_proxy_chain(seed)
+
+        self.assertIn("sid-demo123VN", kakao.unquote(promotion))
+
+    def test_cross_country_fixed_proxy_without_selector_is_rejected(self):
+        seed = "socks5h://customer-sessid-demo123:pass@gw.example:9999"
+        with (
+            patch.object(kakao, "CHECKOUT_COUNTRY", "KR"),
+            patch.object(kakao, "PROMOTION_COUNTRY", "VN"),
+            patch.object(kakao, "PROVIDER_COUNTRY", "KR"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "country/region"):
+                kakao.kakao_proxy_chain(seed)
+
+
 class RemovedHelpersAreGoneTests(unittest.TestCase):
     """Guard against the dead role-level helpers being reintroduced."""
 

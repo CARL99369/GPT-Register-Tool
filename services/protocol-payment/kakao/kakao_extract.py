@@ -78,7 +78,9 @@ _PROXY_COUNTRY_SELECTOR_RE = re.compile(
 # Sticky 代理（如 cliproxy）由 sid 会话标识决定出口 IP：同一 sid 在 TTL 内粘同一个
 # IP，会把不同 region 的派生粘在同一个出口上。为让 checkout/provider(KR) 与
 # promotion(VN) 各自拿到本地区出口，Kakao 给每个地区派生独立 sid（追加国家后缀）。
-_PROXY_SID_RE = re.compile(r"(?i)(?P<name>sid)(?P<separator>[-_=])(?P<value>[A-Za-z0-9]+)")
+_PROXY_SESSION_RE = re.compile(
+    r"(?i)(?<![A-Za-z0-9])(?P<name>sessid|sid)(?P<separator>[-_=])(?P<value>[A-Za-z0-9]+)"
+)
 _state_lock = RLock()
 _file_lock = RLock()
 _proxy_redaction_lock = RLock()
@@ -224,20 +226,20 @@ def proxy_label(proxy: str) -> str:
     return proxy_short(proxy)
 
 
-def proxy_chain_key(proxy: str) -> str:
+def proxy_chain_key(proxy: str, derived_country: str = "") -> str:
     normalized = unquote(normalize_proxy_url(proxy))
     without_country = _PROXY_COUNTRY_SELECTOR_RE.sub(
         lambda match: f"{match.group('name')}{match.group('separator')}*", normalized
     )
-    # 只去掉 sid 尾部的地区后缀（proxy_for_country 追加的 2 位大写国家码），保留
-    # base sid。这样同一 Seed 的三地区派生（base+KR/base+VN）归一化到同一 base →
-    # 同 chain_key（sticky 校验通过）；而多条只有 base sid 不同的冗余 Seed 仍是不同
-    # chain_key，不会被 load_proxy_seeds 去重。假设 base sid 不以 2 位连续大写结尾。
-    def _normalize_sid_base(match: re.Match[str]) -> str:
-        base = re.sub(r"[A-Z]{2}$", "", match.group("value"))
-        return f"{match.group('name')}{match.group('separator')}{base}"
+    country_tag = str(derived_country or "").strip().upper()
+    if country_tag:
+        def strip_derived_tag(match: re.Match[str]) -> str:
+            value = match.group("value")
+            if value.upper().endswith(country_tag) and len(value) > len(country_tag):
+                value = value[:-len(country_tag)]
+            return f"{match.group('name')}{match.group('separator')}{value}"
 
-    without_country = _PROXY_SID_RE.sub(_normalize_sid_base, without_country)
+        without_country = _PROXY_SESSION_RE.sub(strip_derived_tag, without_country)
     return hashlib.sha256(without_country.encode()).hexdigest()[:16] if without_country else ""
 
 
@@ -251,11 +253,15 @@ def proxy_for_country(proxy: str, country: str) -> str:
     password = unquote(parsed.password or "")
     target_country = str(country or "").strip().lower()
     replacements = 0
+    changes = 0
 
     def replace_country(match: re.Match[str]) -> str:
-        nonlocal replacements
+        nonlocal replacements, changes
         replacements += 1
         current = match.group("value")
+        if current.lower() == target_country:
+            return match.group(0)
+        changes += 1
         value = target_country.upper() if current.isupper() else target_country
         return f"{match.group('name')}{match.group('separator')}{value}"
 
@@ -263,15 +269,18 @@ def proxy_for_country(proxy: str, country: str) -> str:
     password = _PROXY_COUNTRY_SELECTOR_RE.sub(replace_country, password)
     if not replacements:
         raise RuntimeError(f"代理未包含可改写的 country/region 选择器: {proxy_label(proxy)}")
-    # 给 sid 追加地区后缀，使 sticky 代理为每个地区分配独立出口 IP。始终从原始 Seed
-    # 调用（kakao_proxy_chain 即如此），避免后缀累积。不含 sid 的代理不受影响。
+    if not changes:
+        return normalized
+    # 给 sid/sessid 追加地区后缀，使 sticky 代理为每个地区分配独立出口 IP。始终从
+    # 原始 Seed 调用（kakao_proxy_chain 即如此），避免后缀累积。没有这些字段的代理
+    # 只改写 country/region。
     country_tag = target_country.upper()
 
     def tag_sid(match: re.Match[str]) -> str:
         return f"{match.group('name')}{match.group('separator')}{match.group('value')}{country_tag}"
 
-    username = _PROXY_SID_RE.sub(tag_sid, username)
-    password = _PROXY_SID_RE.sub(tag_sid, password)
+    username = _PROXY_SESSION_RE.sub(tag_sid, username)
+    password = _PROXY_SESSION_RE.sub(tag_sid, password)
     host = parsed.hostname or ""
     if ":" in host and not host.startswith("["):
         host = f"[{host}]"
@@ -286,13 +295,41 @@ def proxy_for_country(proxy: str, country: str) -> str:
 
 
 def kakao_proxy_chain(proxy_seed: str) -> tuple[str, str, str]:
+    normalized_seed = normalize_proxy_url(proxy_seed)
+    if not normalized_seed:
+        raise RuntimeError("代理为空，无法派生地区链路")
+    parsed_seed = urlsplit(normalized_seed)
+    seed_username = unquote(parsed_seed.username or "")
+    seed_password = unquote(parsed_seed.password or "")
+    has_country_selector = bool(
+        _PROXY_COUNTRY_SELECTOR_RE.search(seed_username)
+        or _PROXY_COUNTRY_SELECTOR_RE.search(seed_password)
+    )
+    countries = (CHECKOUT_COUNTRY, PROMOTION_COUNTRY, PROVIDER_COUNTRY)
+    if not has_country_selector:
+        if len(set(countries)) == 1:
+            return normalized_seed, normalized_seed, normalized_seed
+        raise RuntimeError(
+            f"代理未包含可改写的 country/region 选择器，无法派生 "
+            f"{CHECKOUT_COUNTRY} -> {PROMOTION_COUNTRY} -> {PROVIDER_COUNTRY}: "
+            f"{proxy_label(proxy_seed)}"
+        )
+
     checkout_proxy = proxy_for_country(proxy_seed, CHECKOUT_COUNTRY)
     promotion_proxy = proxy_for_country(proxy_seed, PROMOTION_COUNTRY)
     provider_proxy = proxy_for_country(proxy_seed, PROVIDER_COUNTRY)
     key = proxy_chain_key(proxy_seed)
+    derived = (
+        (checkout_proxy, CHECKOUT_COUNTRY),
+        (promotion_proxy, PROMOTION_COUNTRY),
+        (provider_proxy, PROVIDER_COUNTRY),
+    )
     if not key or any(
-        proxy_chain_key(proxy) != key
-        for proxy in (checkout_proxy, promotion_proxy, provider_proxy)
+        proxy_chain_key(
+            proxy,
+            derived_country=country if proxy != normalized_seed else "",
+        ) != key
+        for proxy, country in derived
     ):
         raise RuntimeError("代理地区改写改变了 sticky Seed，已拒绝混用代理链")
     return checkout_proxy, promotion_proxy, provider_proxy
