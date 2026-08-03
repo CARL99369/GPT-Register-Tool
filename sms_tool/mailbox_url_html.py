@@ -3,6 +3,9 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from html.parser import HTMLParser
+from urllib.parse import urlsplit
+
+import requests
 
 
 _VOID_TAGS = {
@@ -32,6 +35,24 @@ _DATE_RE = re.compile(
     r"(?:[T\s]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?"
     r"(?:\s*(Z|[+-]\d{2}:?\d{2}))?"
 )
+MAX_HTML_BYTES = 2 * 1024 * 1024
+
+
+class UrlHtmlMailboxError(RuntimeError):
+    pass
+
+
+def redact_inbox_url(value):
+    try:
+        parsed = urlsplit(str(value or ""))
+        host = parsed.hostname or "invalid-host"
+        port = f":{parsed.port}" if parsed.port else ""
+        scheme = parsed.scheme.lower() or "https"
+    except ValueError:
+        host = "invalid-host"
+        port = ""
+        scheme = "https"
+    return f"{scheme}://{host}{port}/<redacted>"
 
 
 @dataclass
@@ -273,3 +294,63 @@ def parse_url_html_messages(html, mailbox_email, limit=25):
         if len(unique) >= max(1, int(limit or 25)):
             break
     return unique
+
+
+def fetch_url_html_messages(mailbox, limit=25, proxy="", http_get=requests.get):
+    url = str(getattr(mailbox, "inbox_url", "") or "").strip()
+    safe_url = redact_inbox_url(url)
+    proxies = {"http": proxy, "https": proxy} if proxy else None
+    try:
+        response = http_get(
+            url,
+            headers={"Accept": "text/html,text/plain;q=0.9"},
+            proxies=proxies,
+            timeout=(10, 20),
+            stream=True,
+            allow_redirects=True,
+        )
+    except Exception as exc:
+        raise UrlHtmlMailboxError(
+            f"URL mailbox request failed for {safe_url}: {type(exc).__name__}"
+        ) from exc
+
+    if not 200 <= int(response.status_code or 0) < 300:
+        response.close()
+        raise UrlHtmlMailboxError(
+            f"URL mailbox returned HTTP {response.status_code} for {safe_url}"
+        )
+    content_type = str(response.headers.get("Content-Type") or "").lower()
+    if not any(
+        kind in content_type
+        for kind in ("text/html", "text/plain", "application/xhtml+xml")
+    ):
+        response.close()
+        raise UrlHtmlMailboxError(
+            f"URL mailbox returned unsupported content for {safe_url}"
+        )
+
+    chunks = []
+    size = 0
+    try:
+        for chunk in response.iter_content(chunk_size=65536):
+            if not chunk:
+                continue
+            size += len(chunk)
+            if size > MAX_HTML_BYTES:
+                raise UrlHtmlMailboxError(
+                    f"URL mailbox response exceeds 2 MiB for {safe_url}"
+                )
+            chunks.append(chunk)
+        payload = b"".join(chunks)
+    except UrlHtmlMailboxError:
+        raise
+    except Exception as exc:
+        raise UrlHtmlMailboxError(
+            f"URL mailbox read failed for {safe_url}: {type(exc).__name__}"
+        ) from exc
+    finally:
+        response.close()
+
+    encoding = str(getattr(response, "encoding", "") or "utf-8")
+    html = payload.decode(encoding, errors="replace")
+    return parse_url_html_messages(html, mailbox.email, limit=limit)

@@ -118,7 +118,12 @@ def _email_otp_candidate(mailbox, msg, keyword="", issued_after_unix=0):
     if keyword:
         subject_lc = subject.lower()
         keywords = [part.strip().lower() for part in str(keyword).split("|") if part.strip()]
-        if keywords and not any(part in subject_lc for part in keywords):
+        chinese_otp_subject = (
+            str(getattr(mailbox, "provider", "") or "").strip().lower() == "url_html"
+            and any(marker in subject for marker in ("验证码", "驗證碼"))
+            and any("code" in part for part in keywords)
+        )
+        if keywords and not any(part in subject_lc for part in keywords) and not chinese_otp_subject:
             return None
     recipients = _message_recipients(msg)
     if recipients and not _recipient_matches_mailbox(getattr(mailbox, "email", ""), recipients):

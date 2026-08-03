@@ -33,6 +33,7 @@ from . import mailbox_remail
 from . import mailbox_graph
 from .mailbox_graph import MailboxTokenExpiredError
 from . import mailbox_chongzhi
+from . import mailbox_url_html
 
 # MailboxAccount and parsers moved to mailbox_types/mailbox_parsers.
 
@@ -121,6 +122,19 @@ def _provider_otp_issued_after(mailbox, issued_after_unix):
 
 def _snapshot_mailbox_message(mailbox, proxy=None):
     provider = getattr(mailbox, "provider", "")
+    if provider == "url_html":
+        try:
+            messages = _fetch_mailbox_messages(mailbox, limit=25, proxy=proxy)
+            mailbox.seen_message_ids = tuple(
+                message_id
+                for message_id in (_message_id(message) for message in messages)
+                if message_id
+            )
+            mailbox.seen_message_id = mailbox.seen_message_ids[0] if mailbox.seen_message_ids else ""
+            return mailbox.seen_message_id
+        except Exception as e:
+            print(f"[{provider} snapshot error: {e}]")
+            return ""
     if provider in {"cfworker", "remail"}:
         try:
             messages = _fetch_mailbox_messages(mailbox, limit=1, proxy=proxy)
@@ -392,6 +406,8 @@ def _gmail_imap_port():
 
 def mailbox_has_inbox_credentials(mailbox):
     provider = str(getattr(mailbox, "provider", "") or "").strip().lower()
+    if provider == "url_html":
+        return bool(getattr(mailbox, "email", "") and getattr(mailbox, "inbox_url", ""))
     if provider == "cfworker":
         return bool(getattr(mailbox, "email", ""))
     if provider == "remail":
@@ -403,8 +419,12 @@ def mailbox_has_inbox_credentials(mailbox):
 
 def _latest_email_otp_candidate(mailbox, keyword="", issued_after_unix=0, proxy=None, override_messages=None):
     latest = None
+    provider = str(getattr(mailbox, "provider", "") or "").strip().lower()
+    seen_message_ids = set(getattr(mailbox, "seen_message_ids", ()) or ())
     messages = override_messages if override_messages is not None else _fetch_mailbox_messages(mailbox, proxy=proxy)
     for msg in messages:
+        if provider == "url_html" and _message_id(msg) in seen_message_ids:
+            continue
         candidate = _email_otp_candidate(mailbox, msg, keyword=keyword, issued_after_unix=issued_after_unix)
         if not candidate:
             continue
@@ -428,6 +448,12 @@ def _fetch_mailbox_messages(mailbox, limit=25, proxy=None, include_body=False):
     # If the mailbox has a password and chongzhi is enabled, try the API first.
     # Fall back to local Graph API / IMAP on any failure.
     provider = str(getattr(mailbox, "provider", "") or "")
+    if provider == "url_html":
+        return mailbox_url_html.fetch_url_html_messages(
+            mailbox,
+            limit=limit,
+            proxy=proxy,
+        )
     if provider == "chongzhi" or (mailbox_chongzhi.chongzhi_enabled(_email_cfg()) and getattr(mailbox, "password", "")):
         email = str(getattr(mailbox, "email", "") or "").strip()
         password = str(getattr(mailbox, "password", "") or "").strip()
