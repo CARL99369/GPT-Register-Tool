@@ -85,6 +85,7 @@ def _mailbox_snapshot(mailbox):
         "price": getattr(mailbox, "price", ""),
         "purchase_total_cost": getattr(mailbox, "purchase_total_cost", ""),
         "balance_after": getattr(mailbox, "balance_after", ""),
+        "inbox_url": getattr(mailbox, "inbox_url", ""),
     }
 
 

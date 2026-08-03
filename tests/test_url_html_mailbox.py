@@ -2,9 +2,11 @@ import pytest
 
 from sms_tool import mailbox as mailbox_module
 from sms_tool import mailbox_url_html
+from sms_tool.codex_oauth import _mailbox_from_data
 from sms_tool.mail_otp import _email_otp_candidate
 from sms_tool.mailbox_types import MailboxAccount
 from sms_tool.mailbox_url_html import parse_url_html_messages
+from sms_tool.registration import _mailbox_snapshot
 
 
 def _otp(mailbox, message):
@@ -231,3 +233,16 @@ def test_url_poll_ignores_baseline_and_returns_new_code(monkeypatch):
     )
 
     assert code == "333444"
+
+
+def test_url_mailbox_survives_session_snapshot_round_trip():
+    mailbox = MailboxAccount(
+        email="user@icloud.com",
+        provider="url_html",
+        inbox_url="https://example.test/private/inbox",
+    )
+
+    restored = _mailbox_from_data({"mailbox": _mailbox_snapshot(mailbox)})
+
+    assert restored.provider == "url_html"
+    assert restored.inbox_url == mailbox.inbox_url

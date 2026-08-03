@@ -916,6 +916,7 @@ def _mailbox_from_data(data):
         price=str(mailbox.get("price") or "").strip(),
         purchase_total_cost=str(mailbox.get("purchase_total_cost") or "").strip(),
         balance_after=str(mailbox.get("balance_after") or "").strip(),
+        inbox_url=str(mailbox.get("inbox_url") or "").strip(),
     )
     if not mailbox_has_inbox_credentials(result):
         if mailbox_gmail.is_gmail_mailbox(result):

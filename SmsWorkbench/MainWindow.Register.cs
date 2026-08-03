@@ -48,9 +48,11 @@ namespace SmsWorkbench
             {
                 string line = raw.Trim();
                 if (line.Length == 0 || line.StartsWith("#")) continue;
-                if (!line.Contains("----")) { skipped++; continue; }
-                string[] parts = line.Split(new[] { "----" }, StringSplitOptions.None);
-                if (parts.Length < 4) { skipped++; continue; }
+                bool existingFourPart = line.Contains("----")
+                    && line.Split(new[] { "----" }, StringSplitOptions.None).Length >= 4;
+                bool urlHtml = MailboxLineParser.TryParse(line, out MailboxLineInfo parsed)
+                    && parsed.Provider == "url_html";
+                if (!existingFourPart && !urlHtml) { skipped++; continue; }
                 if (existingLines.Contains(line)) { skipped++; continue; }
                 newLines.Add(line);
                 imported++;
@@ -627,16 +629,9 @@ namespace SmsWorkbench
 
         private string MailboxArgForLine(string line)
         {
-            string value = (line ?? "").Trim().TrimStart('\ufeff');
-            if (value.Length == 0 || value.StartsWith("#")) return "";
-            if (value.StartsWith("cfworker://", StringComparison.OrdinalIgnoreCase)
-                || value.EndsWith("@edu.liziai.cloud", StringComparison.OrdinalIgnoreCase)
-                || value.EndsWith("@liziai.cloud", StringComparison.OrdinalIgnoreCase)) return "--mailbox-file";
-            if (value.StartsWith("remail://", StringComparison.OrdinalIgnoreCase)) return "--mailbox-file";
-            if (value.StartsWith("gmail://", StringComparison.OrdinalIgnoreCase)) return "--mailbox-file";
-            if (value.Contains("----") && value.Split(new[] { "----" }, StringSplitOptions.None).Length >= 4) return "--chatai-mailbox-file";
-            if (value.Contains("---") && value.Split(new[] { "---" }, StringSplitOptions.None).Length >= 3) return "--mailbox-file";
-            return "";
+            return MailboxLineParser.TryParse(line, out MailboxLineInfo info)
+                ? info.CommandArgument
+                : "";
         }
 
         private string FindMailboxLineForRow(PoolRow row)
@@ -693,7 +688,12 @@ namespace SmsWorkbench
                 string serviceToken = JsonString(mailbox, "token");
                 string orderNo = JsonString(mailbox, "order_no");
                 string purchaseId = JsonString(mailbox, "purchase_id");
+                string inboxUrl = JsonString(mailbox, "inbox_url");
                 if (email.Length == 0) return "";
+                if (provider.Equals("url_html", StringComparison.OrdinalIgnoreCase))
+                {
+                    return inboxUrl.Length > 0 ? email + "----" + inboxUrl : "";
+                }
                 if (provider.Equals("cfworker", StringComparison.OrdinalIgnoreCase))
                 {
                     return "cfworker://" + email;
@@ -758,7 +758,14 @@ namespace SmsWorkbench
                 provider = JsonString(mailbox, "provider");
                 string orderNo = JsonString(mailbox, "order_no");
                 string purchaseId = JsonString(mailbox, "purchase_id");
+                string inboxUrl = JsonString(mailbox, "inbox_url");
                 if (email.Length == 0) return false;
+
+                if (provider.Equals("url_html", StringComparison.OrdinalIgnoreCase))
+                {
+                    mailboxLine = inboxUrl.Length > 0 ? email + "----" + inboxUrl : "";
+                    return mailboxLine.Length > 0;
+                }
 
                 if (provider.Equals("cfworker", StringComparison.OrdinalIgnoreCase))
                 {

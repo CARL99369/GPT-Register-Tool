@@ -295,6 +295,27 @@ namespace SmsWorkbench
                     continue;
                 }
 
+                if (MailboxLineParser.TryParse(line, out MailboxLineInfo parsed)
+                    && parsed.Provider == "url_html")
+                {
+                    allRows.Add(new PoolRow
+                    {
+                        Id = "M" + (i + 1),
+                        CreatedAt = SafeTime(File.GetLastWriteTime(path)),
+                        CompletedAt = SafeTime(File.GetLastWriteTime(path)),
+                        Identifier = parsed.Email,
+                        AccountType = "URL邮箱池",
+                        Status = "可收信",
+                        RefreshToken = "URL HTML",
+                        Notes = path,
+                        SourcePath = path,
+                        RawLine = line,
+                        MailboxLine = line,
+                        MailboxProvider = "url_html"
+                    });
+                    continue;
+                }
+
                 if (line.Contains("----"))
                 {
                     string[] parts = line.Split(new[] { "----" }, 4, StringSplitOptions.None);
@@ -398,6 +419,7 @@ namespace SmsWorkbench
                     bool isCfWorkerMailbox = mailboxProvider.Equals("cfworker", StringComparison.OrdinalIgnoreCase);
                     bool isReMailMailbox = mailboxProvider.Equals("remail", StringComparison.OrdinalIgnoreCase);
                     bool isGmailMailbox = mailboxProvider.Equals("gmail", StringComparison.OrdinalIgnoreCase);
+                    bool isUrlHtmlMailbox = mailboxProvider.Equals("url_html", StringComparison.OrdinalIgnoreCase);
                     bool isChataiMailbox = mailboxProvider.Equals("chatai", StringComparison.OrdinalIgnoreCase) || (mailboxClientId.Length > 0 && !isCfWorkerMailbox && !isReMailMailbox);
                     var dbRow = new PoolRow
                     {
@@ -405,7 +427,7 @@ namespace SmsWorkbench
                         CreatedAt = UnixTimeText(data.TryGetValue("created_at", out string created) ? created : ""),
                         CompletedAt = UnixTimeText(data.TryGetValue("updated_at", out string updated) ? updated : ""),
                         Identifier = data.TryGetValue("email", out string email) ? email : "",
-                        AccountType = isCfWorkerMailbox ? "SQLite/CFWorker" : isReMailMailbox ? "SQLite/ReMail" : isGmailMailbox ? "SQLite/Gmail" : isChataiMailbox ? "SQLite/Chatai" : "SQLite",
+                        AccountType = isCfWorkerMailbox ? "SQLite/CFWorker" : isReMailMailbox ? "SQLite/ReMail" : isGmailMailbox ? "SQLite/Gmail" : isUrlHtmlMailbox ? "SQLite/URL HTML" : isChataiMailbox ? "SQLite/Chatai" : "SQLite",
                         AccountPlanType = GetAccountPlanType(rawData),
                         RegistrationCountry = data.TryGetValue("registration_country", out string registrationCountry) ? registrationCountry : "",
                         QuotaStatus = GetQuotaStatus(rawData),
@@ -417,7 +439,7 @@ namespace SmsWorkbench
                         HasAccessToken = !string.IsNullOrWhiteSpace(access),
                         AccessTokenProbeStatusCode = GetAccessTokenProbeStatusCode(rawData),
                         PayPalUrl = paypalUrl,
-                        RefreshToken = isCfWorkerMailbox ? "CFWorker" : isReMailMailbox ? "ReMail" : isGmailMailbox ? (mailboxRefreshToken.Length > 0 ? Mask(mailboxRefreshToken) : "AppPassword") : Mask(isChataiMailbox ? mailboxRefreshToken : access),
+                        RefreshToken = isCfWorkerMailbox ? "CFWorker" : isReMailMailbox ? "ReMail" : isGmailMailbox ? (mailboxRefreshToken.Length > 0 ? Mask(mailboxRefreshToken) : "AppPassword") : isUrlHtmlMailbox ? "URL HTML" : Mask(isChataiMailbox ? mailboxRefreshToken : access),
                         Proxy = DbTimingText(data),
                         Notes = string.IsNullOrWhiteSpace(jsonPath) ? dbPath : jsonPath,
                         SourcePath = dbPath,
@@ -467,13 +489,14 @@ namespace SmsWorkbench
                         string timing = GetTimingText(data);
                         bool isGmailMailbox = mailboxProvider.Equals("gmail", StringComparison.OrdinalIgnoreCase);
                         bool isReMailMailbox = mailboxProvider.Equals("remail", StringComparison.OrdinalIgnoreCase);
+                        bool isUrlHtmlMailbox = mailboxProvider.Equals("url_html", StringComparison.OrdinalIgnoreCase);
                         var sessionRow = new PoolRow
                         {
                             Id = "S" + (allRows.Count + 1),
                             CreatedAt = SafeTime(File.GetCreationTime(path)),
                             CompletedAt = SafeTime(File.GetLastWriteTime(path)),
                             Identifier = email,
-                            AccountType = mailboxProvider.Equals("cfworker", StringComparison.OrdinalIgnoreCase) ? "Session/CFWorker" : isReMailMailbox ? "Session/ReMail" : isGmailMailbox ? "Session/Gmail" : "Session",
+                            AccountType = mailboxProvider.Equals("cfworker", StringComparison.OrdinalIgnoreCase) ? "Session/CFWorker" : isReMailMailbox ? "Session/ReMail" : isGmailMailbox ? "Session/Gmail" : isUrlHtmlMailbox ? "Session/URL HTML" : "Session",
                             AccountPlanType = GetAccountPlanType(data),
                             RegistrationCountry = GetString(data, "registration_country"),
                             QuotaStatus = GetQuotaStatus(data),
@@ -487,7 +510,7 @@ namespace SmsWorkbench
                             HasAccessToken = !string.IsNullOrWhiteSpace(access),
                             AccessTokenProbeStatusCode = GetAccessTokenProbeStatusCode(data),
                             PayPalUrl = paypalUrl,
-                            RefreshToken = mailboxProvider.Equals("cfworker", StringComparison.OrdinalIgnoreCase) ? "CFWorker" : isReMailMailbox ? "ReMail" : isGmailMailbox ? (mailboxRefreshToken.Length > 0 ? Mask(mailboxRefreshToken) : "AppPassword") : Mask(access),
+                            RefreshToken = mailboxProvider.Equals("cfworker", StringComparison.OrdinalIgnoreCase) ? "CFWorker" : isReMailMailbox ? "ReMail" : isGmailMailbox ? (mailboxRefreshToken.Length > 0 ? Mask(mailboxRefreshToken) : "AppPassword") : isUrlHtmlMailbox ? "URL HTML" : Mask(access),
                             Proxy = timing,
                             Notes = path,
                             SourcePath = path,
