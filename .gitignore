@@ -2,6 +2,7 @@ config.json
 .agents/skills/
 .claude/
 .codex/
+.worktrees/
 sms_tool/config.json
 services/mail-otp-web/config.json
 outlook_results/
