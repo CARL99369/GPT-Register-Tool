@@ -160,6 +160,7 @@ $env:REMAIL_API_KEY = "rk-your-key"
 - Outlook/Hotmail IMAP 回退。
 - Gmail IMAP 与 SMTP。
 - Chatai、token 文件及历史邮箱池格式。
+- URL HTML 邮箱页面；支持不同网站的静态 HTML，并复用统一 OTP 过滤。
 
 OTP 解析支持主题匹配、发件人过滤、收件人精确匹配、服务端时间戳过滤和候选排序。
 
@@ -427,6 +428,18 @@ python chatgpt_phone_reg.py --buy-cfworker-mailbox --cfworker-domain example.com
 python chatgpt_phone_reg.py --chatai-mailbox-file hotmail.txt --count 4 --workers 4
 ```
 
+#### URL HTML 邮箱
+
+每行格式：
+
+```text
+邮箱地址----https://邮件网站/该邮箱的收件页面
+```
+
+桌面端点击“导入邮箱”后，可以像其他邮箱池记录一样勾选并注册。选择这种邮箱时会自动使用仅邮箱注册，不需要手机号或接码平台。
+
+页面必须通过普通 HTTP 请求直接返回邮件 HTML；当前不会执行页面 JavaScript、自动登录或抓取页面内的其他链接。URL 可以来自任意经过人工确认的网站，支持常见邮件卡片、列表、表格及整页可见文本结构。URL 路径和查询参数可能包含访问凭据，请勿公开分享导入文件或完整 URL。
+
 ### 测试支付代理出口
 
 ```powershell
@@ -514,6 +527,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build_installer.ps1 -Version 
 - `config.json`、`sessions/`、`runtime/`、邮箱池和 Token 文件默认被 Git 忽略。
 - 示例配置不包含真实 API Key、邮箱凭据或代理密码。
 - ReMail API Key 与 Service Token 在异常和日志中会被脱敏。
+- URL HTML 邮箱的完整地址仅保存在本地邮箱池和 session 中；错误日志会隐藏路径、查询参数及 URL 用户信息。
 - 支付链接、BA Token、账号 AT/RT 和邮箱凭据都属于敏感数据，不应公开分享。
 - 第三方邮箱、支付、代理和接码服务的可用性及费用由对应服务商决定。
 

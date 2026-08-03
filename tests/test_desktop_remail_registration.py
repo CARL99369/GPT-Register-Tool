@@ -25,8 +25,9 @@ def test_long_term_remail_enables_smsbower_instead_of_at_only_mode():
 
 
 def test_registered_remail_rows_can_build_one_click_sms_mailbox_files():
-    source = (ROOT / "SmsWorkbench" / "MainWindow.Register.cs").read_text(encoding="utf-8-sig")
+    register_source = (ROOT / "SmsWorkbench" / "MainWindow.Register.cs").read_text(encoding="utf-8-sig")
+    parser_source = (ROOT / "SmsWorkbench" / "MailboxLineParser.cs").read_text(encoding="utf-8-sig")
 
-    assert 'value.StartsWith("remail://"' in source
-    assert 'provider.Equals("remail"' in source
-    assert "BuildReMailLine(email, serviceToken, orderNo, purchaseId)" in source
+    assert 'value.StartsWith("remail://"' in parser_source
+    assert 'provider.Equals("remail"' in register_source
+    assert "BuildReMailLine(email, serviceToken, orderNo, purchaseId)" in register_source

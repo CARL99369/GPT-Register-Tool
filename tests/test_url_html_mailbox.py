@@ -1,3 +1,6 @@
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
 import pytest
 
 from sms_tool import mailbox as mailbox_module
@@ -246,3 +249,38 @@ def test_url_mailbox_survives_session_snapshot_round_trip():
 
     assert restored.provider == "url_html"
     assert restored.inbox_url == mailbox.inbox_url
+
+
+def test_fetches_mailbox_from_local_http_server():
+    class InboxHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            payload = (
+                b"<article><h2>ChatGPT verification code</h2>"
+                b"<p>Your code is 908172</p></article>"
+            )
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, format, *args):
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), InboxHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        mailbox = MailboxAccount(
+            email="user@icloud.com",
+            provider="url_html",
+            inbox_url=f"http://127.0.0.1:{server.server_port}/inbox",
+        )
+
+        messages = mailbox_url_html.fetch_url_html_messages(mailbox)
+
+        assert _otp(mailbox, messages[0]) == "908172"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)

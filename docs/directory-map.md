@@ -43,7 +43,7 @@ These directories are runtime state and are ignored by Git:
 | Group | Files | Boundary |
 | --- | --- | --- |
 | Entrypoints/config | `__main__.py`, `cli.py`, `config.py`, `paths.py`, `commands/` | Parse commands and resolve config/paths; no vendor protocol implementation. |
-| Mailbox and phone inventory | `mailbox.py`, `mailbox_types.py`, `mailbox_parsers.py`, `mailbox_remail.py`, `mailbox_cfworker.py`, `mailbox_graph.py`, `mailbox_gmail.py`, `mailbox_chongzhi.py`, `outlook_imap.py`, `mail_otp.py`, `providers/`, `smsbower.py`, `phone_reuse.py`, `phone_proxy.py`, `sms_provider.py` | Acquire/poll mailboxes or phone activations; ReMail uses API-key-authenticated ordering and service-token pickup with adaptive OTP polling; Gmail receive/send stays inside the mailbox seam and uses exact mailbox addresses without alias expansion; no account persistence except through explicit callers. |
+| Mailbox and phone inventory | `mailbox.py`, `mailbox_types.py`, `mailbox_parsers.py`, `mailbox_url_html.py`, `mailbox_remail.py`, `mailbox_cfworker.py`, `mailbox_graph.py`, `mailbox_gmail.py`, `mailbox_chongzhi.py`, `outlook_imap.py`, `mail_otp.py`, `providers/`, `smsbower.py`, `phone_reuse.py`, `phone_proxy.py`, `sms_provider.py` | Acquire/poll mailboxes or phone activations; URL HTML downloads only the imported HTTP(S) page and normalizes static visible HTML; ReMail uses API-key-authenticated ordering and service-token pickup with adaptive OTP polling; Gmail receive/send stays inside the mailbox seam and uses exact mailbox addresses without alias expansion; no account persistence except through explicit callers. |
 | Registration/auth | `registration.py`, `registration_progress.py`, `registration_concurrency.py`, `auth_flow.py`, `auth_headers.py`, `account_creation.py`, `batch_runner.py`, `sentinel_tokens.py`, `sentinel_quickjs.py`, `otp_strategy.py`, `auth_state.py`, `error_classification.py`, `codex_oauth.py`, `codex_sentinel.py`, `codex_phone.py`, `session_refresh.py` | ChatGPT/OpenAI auth, OTP, Sentinel, session refresh, optional phone verification, progress persistence, and independent stage resource gates. |
 | Agent Identity / explicit import | `agent_identity.py`, `sub2api_import.py` | Ed25519 credential conversion for explicit SUB2API import; not called by the registration pipeline. Keys are persisted under `sessions/agent_identities/`. |
 | Workspace compatibility | `k12_client.py`, `k12_identity.py`, `workspace_scan.py` | Legacy explicit Workspace helpers retained for Python callers; the CLI account scan no longer enables this path. |
@@ -80,3 +80,9 @@ These directories are runtime state and are ignored by Git:
    directories.
 7. Sidebar actions that require an email must use the selected-email seam and
    the themed `未选择邮箱` dialog; do not call `MessageBox.Show` for that state.
+
+## Focused desktop helpers
+
+| Path | Responsibility |
+| --- | --- |
+| `SmsWorkbench/MailboxLineParser.cs` | Shares URL HTML, Chatai, Graph, Gmail, ReMail, and CFWorker line classification across import, pool display, and selected registration. |
