@@ -1,0 +1,458 @@
+using System.Text.Json;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
+using System.Windows.Media;
+using System.Windows.Threading;
+using SmsWorkbench;
+
+namespace SmsWorkbench.Tests;
+
+public sealed class DesktopWindowSmokeTests
+{
+    private static void VerifyComboBoxPopup()
+    {
+        var comboBox = new ComboBox
+        {
+            Width = 240,
+            MaxDropDownHeight = 80,
+            SelectedIndex = 0,
+            ItemsSource = Enumerable.Range(1, 20)
+                .Select(index => $"Option {index}: {new string('x', 80)}")
+                .ToArray()
+        };
+        var host = new Window { Width = 420, Height = 240, Content = comboBox };
+
+        host.Show();
+        host.UpdateLayout();
+
+        var toggleButton = Assert.IsType<ToggleButton>(comboBox.Template.FindName("ToggleButton", comboBox));
+        var contentSite = Assert.IsType<ContentPresenter>(comboBox.Template.FindName("ContentSite", comboBox));
+        Assert.Equal(comboBox.ActualWidth, toggleButton.ActualWidth, precision: 3);
+        Assert.Equal(comboBox.ActualHeight, toggleButton.ActualHeight, precision: 3);
+        Assert.True(contentSite.ActualWidth > 0);
+
+        comboBox.IsDropDownOpen = true;
+        FlushDispatcher();
+
+        var popup = Assert.IsType<Popup>(comboBox.Template.FindName("Popup", comboBox));
+        var border = Assert.IsType<Border>(popup.Child);
+        Assert.True(border.ActualWidth >= comboBox.ActualWidth);
+
+        ScrollBar verticalBar = FindVisualChildren<ScrollBar>(border)
+            .Single(scrollBar => scrollBar.Orientation == Orientation.Vertical);
+        ScrollBar horizontalBar = FindVisualChildren<ScrollBar>(border)
+            .Single(scrollBar => scrollBar.Orientation == Orientation.Horizontal);
+        Assert.True(verticalBar.ActualWidth > 0);
+        Assert.True(horizontalBar.ActualHeight > 0);
+        Assert.NotNull(verticalBar.Template.FindName("PART_Track", verticalBar));
+        Assert.NotNull(horizontalBar.Template.FindName("PART_Track", horizontalBar));
+
+        host.Close();
+    }
+
+    private static void VerifyScrollableEditorsAndTables()
+    {
+        var proxyEditor = new TextBox
+        {
+            Width = 260,
+            Height = 90,
+            AcceptsReturn = true,
+            TextWrapping = TextWrapping.NoWrap,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            Text = string.Join(Environment.NewLine, Enumerable.Repeat(new string('x', 90), 12))
+        };
+        var editorHost = new Window { Width = 360, Height = 180, Content = proxyEditor };
+        editorHost.Show();
+        editorHost.UpdateLayout();
+        FlushDispatcher();
+
+        Assert.True(proxyEditor.Focusable);
+        Assert.NotNull(proxyEditor.Template.FindName("PART_ContentHost", proxyEditor));
+        AssertStableScrollBars(proxyEditor, expectVertical: true, expectHorizontal: true);
+        editorHost.Close();
+
+        var dataGrid = new DataGrid
+        {
+            Width = 360,
+            Height = 150,
+            AutoGenerateColumns = false,
+            ItemsSource = new[] { new { Value = "mailbox@example.com" } }
+        };
+        dataGrid.Columns.Add(new DataGridTextColumn { Header = "One", Binding = new System.Windows.Data.Binding("Value"), Width = 240 });
+        dataGrid.Columns.Add(new DataGridTextColumn { Header = "Two", Binding = new System.Windows.Data.Binding("Value"), Width = 240 });
+        dataGrid.Columns.Add(new DataGridTextColumn { Header = "Three", Binding = new System.Windows.Data.Binding("Value"), Width = 240 });
+        var gridHost = new Window { Width = 460, Height = 240, Content = dataGrid };
+        gridHost.Show();
+        gridHost.UpdateLayout();
+        FlushDispatcher();
+
+        AssertStableScrollBars(dataGrid, expectVertical: false, expectHorizontal: true);
+        gridHost.Close();
+    }
+
+    private static void AssertStableScrollBars(
+        DependencyObject owner,
+        bool expectVertical,
+        bool expectHorizontal)
+    {
+        ScrollBar verticalBar = FindVisualChildren<ScrollBar>(owner)
+            .Single(scrollBar => scrollBar.Orientation == Orientation.Vertical);
+        ScrollBar horizontalBar = FindVisualChildren<ScrollBar>(owner)
+            .Single(scrollBar => scrollBar.Orientation == Orientation.Horizontal);
+        Assert.Equal(expectVertical ? Visibility.Visible : Visibility.Collapsed, verticalBar.Visibility);
+        Assert.Equal(expectHorizontal ? Visibility.Visible : Visibility.Collapsed, horizontalBar.Visibility);
+        if (expectVertical)
+        {
+            Assert.True(verticalBar.ActualWidth > 0);
+            Assert.NotNull(verticalBar.Template.FindName("PART_Track", verticalBar));
+        }
+        if (expectHorizontal)
+        {
+            Assert.True(horizontalBar.ActualHeight > 0);
+            Assert.NotNull(horizontalBar.Template.FindName("PART_Track", horizontalBar));
+        }
+    }
+
+    private static void VerifySettingsLayout(
+        SettingsWindow settings,
+        SettingsViewModel viewModel)
+    {
+        SettingsCategoryViewModel networkCategory = viewModel.Categories.Single(category => category.Title == "网络与支付");
+        string proxyLines = string.Join(
+            Environment.NewLine,
+            Enumerable.Range(1, 12).Select(index => $"http://proxy-{index:D2}-{new string('x', 90)}.example:8080"));
+        foreach (SettingFieldViewModel field in networkCategory.Sections
+                     .SelectMany(section => section.Fields)
+                     .Where(field => field.Key is "registration_proxy_pool" or "protocol_proxy_pool"))
+        {
+            field.Value = proxyLines;
+        }
+
+        viewModel.SelectedCategory = networkCategory;
+        FlushDispatcher();
+        settings.UpdateLayout();
+        FlushDispatcher();
+
+        FrameworkElement[] editors = FindVisualChildren<FrameworkElement>(settings)
+            .Where(element => element.IsVisible
+                && element.ActualWidth > 0
+                && element.DataContext is SettingFieldViewModel
+                && element is TextBox or PasswordBox or ComboBox)
+            .ToArray();
+        Assert.True(editors.Length >= 10);
+
+        Rect[] editorBounds = editors.Select(editor => BoundsRelativeTo(editor, settings)).ToArray();
+        Assert.True(editorBounds.Max(bounds => bounds.Left) - editorBounds.Min(bounds => bounds.Left) <= 0.5);
+        Assert.True(editorBounds.Max(bounds => bounds.Right) - editorBounds.Min(bounds => bounds.Right) <= 0.5);
+
+        var contentScrollViewer = Assert.IsType<ScrollViewer>(settings.FindName("SettingsContentScrollViewer"));
+        var outerVerticalBar = Assert.IsType<ScrollBar>(
+            contentScrollViewer.Template.FindName("PART_VerticalScrollBar", contentScrollViewer));
+        Assert.Equal(Visibility.Visible, outerVerticalBar.Visibility);
+        Rect outerBarBounds = BoundsRelativeTo(outerVerticalBar, settings);
+        Assert.All(editorBounds, bounds => Assert.True(bounds.Right <= outerBarBounds.Left - 8));
+
+        TextBox[] proxyEditors = editors
+            .OfType<TextBox>()
+            .Where(editor => editor.DataContext is SettingFieldViewModel field
+                && field.Key is "registration_proxy_pool" or "protocol_proxy_pool")
+            .ToArray();
+        Assert.Equal(2, proxyEditors.Length);
+        foreach (TextBox proxyEditor in proxyEditors)
+        {
+            Assert.Equal(148, proxyEditor.ActualHeight, precision: 3);
+            var innerScrollViewer = Assert.IsType<ScrollViewer>(
+                proxyEditor.Template.FindName("PART_ContentHost", proxyEditor));
+            var scrollContent = Assert.IsType<ScrollContentPresenter>(
+                innerScrollViewer.Template.FindName("PART_ScrollContentPresenter", innerScrollViewer));
+            var horizontalBar = Assert.IsType<ScrollBar>(
+                innerScrollViewer.Template.FindName("PART_HorizontalScrollBar", innerScrollViewer));
+            var verticalBar = Assert.IsType<ScrollBar>(
+                innerScrollViewer.Template.FindName("PART_VerticalScrollBar", innerScrollViewer));
+
+            Assert.Equal(Visibility.Visible, horizontalBar.Visibility);
+            Assert.Equal(Visibility.Visible, verticalBar.Visibility);
+            Rect contentBounds = BoundsRelativeTo(scrollContent, proxyEditor);
+            Rect horizontalBounds = BoundsRelativeTo(horizontalBar, proxyEditor);
+            Rect verticalBounds = BoundsRelativeTo(verticalBar, proxyEditor);
+            Assert.True(contentBounds.Bottom <= horizontalBounds.Top + 0.5);
+            Assert.True(contentBounds.Right <= verticalBounds.Left + 0.5);
+        }
+    }
+
+    private static Rect BoundsRelativeTo(FrameworkElement element, Visual ancestor)
+    {
+        Point topLeft = element.TransformToAncestor(ancestor).Transform(new Point());
+        return new Rect(topLeft, new Size(element.ActualWidth, element.ActualHeight));
+    }
+
+    private static void VerifyMainWindowRegistrationAndContextMenu(string rootDirectory)
+    {
+        using var logger = new Serilog.LoggerConfiguration().CreateLogger();
+        var main = new MainWindow(
+            new TestApplicationPaths(rootDirectory),
+            new StubBackendClient(),
+            new WindowPaymentBatchDialogService(),
+            new Wpf.Ui.SnackbarService(),
+            new WindowSettingsDialogService(),
+            logger);
+        try
+        {
+            main.Show();
+            main.UpdateLayout();
+            FlushDispatcher();
+
+            var accountGrid = Assert.IsType<DataGrid>(main.FindName("AccountGrid"));
+            string[] headers = accountGrid.Columns.Select(column => column.Header?.ToString() ?? "").ToArray();
+            Assert.DoesNotContain("注册批次", headers);
+            Assert.DoesNotContain("入库", headers);
+
+            var contextMenu = Assert.IsType<ContextMenu>(accountGrid.ContextMenu);
+            contextMenu.PlacementTarget = accountGrid;
+            contextMenu.Placement = PlacementMode.Center;
+            contextMenu.IsOpen = true;
+            FlushDispatcher();
+
+            Assert.NotNull(contextMenu.Template.FindName("MenuChrome", contextMenu));
+            MenuItem[] menuItems = contextMenu.Items.OfType<MenuItem>().ToArray();
+            Assert.True(menuItems.Length >= 8);
+            var headerLeftEdges = new List<double>();
+            foreach (MenuItem menuItem in menuItems)
+            {
+                menuItem.ApplyTemplate();
+                var icon = Assert.IsType<ContentPresenter>(menuItem.Template.FindName("IconPresenter", menuItem));
+                var header = Assert.IsType<TextBlock>(menuItem.Template.FindName("HeaderText", menuItem));
+                Rect iconBounds = BoundsRelativeTo(icon, menuItem);
+                Rect headerBounds = BoundsRelativeTo(header, menuItem);
+                Assert.True(Math.Abs(iconBounds.Top + iconBounds.Height / 2 - (headerBounds.Top + headerBounds.Height / 2)) <= 0.5);
+                headerLeftEdges.Add(headerBounds.Left);
+            }
+            Assert.True(headerLeftEdges.Max() - headerLeftEdges.Min() <= 0.5);
+            contextMenu.IsOpen = false;
+
+            string[] sourceOptions = Array.Empty<string>();
+            string[] fieldLabels = Array.Empty<string>();
+            string[] checkBoxLabels = Array.Empty<string>();
+            int comboBoxCount = 0;
+            Exception? captureFailure = null;
+            Dispatcher.CurrentDispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, new Action(() =>
+            {
+                try
+                {
+                    Window dialog = Application.Current.Windows
+                        .Cast<Window>()
+                        .Single(window => window.Title == "一键注册");
+                    dialog.UpdateLayout();
+                    ComboBox[] comboBoxes = FindVisualChildren<ComboBox>(dialog).ToArray();
+                    comboBoxCount = comboBoxes.Length;
+                    ComboBox sourceBox = comboBoxes.First();
+                    sourceBox.SelectedIndex = 1;
+                    dialog.UpdateLayout();
+                    sourceOptions = sourceBox.Items
+                        .OfType<ComboBoxItem>()
+                        .Select(item => item.Content?.ToString() ?? "")
+                        .ToArray();
+                    fieldLabels = FindVisualChildren<TextBlock>(dialog)
+                        .Select(label => label.Text)
+                        .Where(text => !string.IsNullOrWhiteSpace(text))
+                        .ToArray();
+                    checkBoxLabels = FindVisualChildren<CheckBox>(dialog)
+                        .Select(checkBox => checkBox.Content?.ToString() ?? "")
+                        .Where(text => !string.IsNullOrWhiteSpace(text))
+                        .ToArray();
+                    dialog.Close();
+                }
+                catch (Exception exception)
+                {
+                    captureFailure = exception;
+                    Application.Current.Windows
+                        .Cast<Window>()
+                        .FirstOrDefault(window => window.Title == "一键注册")
+                        ?.Close();
+                }
+            }));
+
+            var method = typeof(MainWindow).GetMethod(
+                "ShowRegisterOptionsDialog",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+            Assert.NotNull(method);
+            Assert.Null(method.Invoke(main, null));
+            Assert.Null(captureFailure);
+            Assert.Contains("CF Woker Mail", sourceOptions);
+            Assert.DoesNotContain("liziai.cloud (CFWorker)", sourceOptions);
+            Assert.DoesNotContain("邮箱采购上限", fieldLabels);
+            Assert.DoesNotContain("最大采购成本", fieldLabels);
+            Assert.DoesNotContain("注册批次 ID", fieldLabels);
+            Assert.DoesNotContain("生链方式", fieldLabels);
+            Assert.DoesNotContain("只注册，不生成支付链接", checkBoxLabels);
+            Assert.Equal(1, comboBoxCount);
+
+            int selectedComboBoxCount = -1;
+            int selectedCheckBoxCount = -1;
+            captureFailure = null;
+            Dispatcher.CurrentDispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, new Action(() =>
+            {
+                try
+                {
+                    Window dialog = Application.Current.Windows
+                        .Cast<Window>()
+                        .Single(window => window.Title == "选中邮箱注册");
+                    dialog.UpdateLayout();
+                    selectedComboBoxCount = FindVisualChildren<ComboBox>(dialog).Count();
+                    selectedCheckBoxCount = FindVisualChildren<CheckBox>(dialog).Count();
+                    dialog.Close();
+                }
+                catch (Exception exception)
+                {
+                    captureFailure = exception;
+                    Application.Current.Windows
+                        .Cast<Window>()
+                        .FirstOrDefault(window => window.Title == "选中邮箱注册")
+                        ?.Close();
+                }
+            }));
+
+            method = typeof(MainWindow).GetMethod(
+                "ShowSelectedRegisterOptionsDialog",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+            Assert.NotNull(method);
+            Assert.Null(method.Invoke(main, new object[] { 1 }));
+            Assert.Null(captureFailure);
+            Assert.Equal(0, selectedComboBoxCount);
+            Assert.Equal(0, selectedCheckBoxCount);
+        }
+        finally
+        {
+            main.Close();
+        }
+    }
+
+    [Fact]
+    public void SettingsPaymentAndSharedControlsLoadOnStaThread()
+    {
+        RunOnSta(() =>
+        {
+            using var fixture = new TemporaryDirectory();
+            File.WriteAllText(
+                Path.Combine(fixture.Path, "config.json"),
+                "{\"protocol_payments\":{\"matrix\":{\"cells\":[]}}}");
+            var application = CreateApplication();
+            var launcher = new StubFileLauncher();
+
+            VerifyComboBoxPopup();
+            VerifyScrollableEditorsAndTables();
+
+            var settingsViewModel = new SettingsViewModel(
+                new SettingsService(new TestApplicationPaths(fixture.Path)),
+                launcher);
+            var settings = new SettingsWindow(settingsViewModel)
+            {
+                Width = 920,
+                Height = 660
+            };
+            settings.Show();
+            settings.UpdateLayout();
+            Assert.True(settings.ActualWidth >= settings.MinWidth);
+            Assert.True(settings.ActualHeight >= settings.MinHeight);
+            var secretBox = FindVisualChildren<PasswordBox>(settings).First();
+            var secretField = Assert.IsType<SettingFieldViewModel>(secretBox.DataContext);
+            Assert.Equal(SettingFieldKind.Secret, secretField.Kind);
+            Assert.True(secretBox.Focusable);
+            Assert.True(secretBox.IsHitTestVisible);
+            Assert.NotNull(secretBox.Template.FindName("PART_ContentHost", secretBox));
+            secretBox.Password = "first-edit";
+            Assert.Equal("first-edit", secretField.Value);
+            secretBox.Password = "second-edit";
+            Assert.Equal("second-edit", secretField.Value);
+            Assert.NotNull(secretBox.GetBindingExpression(PasswordBoxBinding.BoundPasswordProperty));
+            VerifySettingsLayout(settings, settingsViewModel);
+            settings.Close();
+
+            var payment = new PaymentBatchWindow(new PaymentBatchViewModel(
+                new WindowPaymentBatchService(),
+                launcher,
+                new[] { new PaymentBatchAccount("smoke@example.com", true) }));
+            payment.Show();
+            payment.UpdateLayout();
+            Assert.True(payment.ActualWidth >= payment.MinWidth);
+            Assert.True(payment.ActualHeight >= payment.MinHeight);
+            Assert.DoesNotContain(
+                ((PaymentBatchViewModel)payment.DataContext).PaymentMethodOptions,
+                option => option.Id == "blik");
+            payment.Close();
+            VerifyMainWindowRegistrationAndContextMenu(fixture.Path);
+            application.Shutdown();
+        });
+    }
+
+    private static App CreateApplication()
+    {
+        var application = new App();
+        application.InitializeComponent();
+        application.ShutdownMode = ShutdownMode.OnExplicitShutdown;
+        return application;
+    }
+
+    private static void FlushDispatcher()
+        => Dispatcher.CurrentDispatcher.Invoke(() => { }, DispatcherPriority.ApplicationIdle);
+
+    private static IEnumerable<T> FindVisualChildren<T>(DependencyObject parent) where T : DependencyObject
+    {
+        for (int index = 0; index < VisualTreeHelper.GetChildrenCount(parent); index++)
+        {
+            DependencyObject child = VisualTreeHelper.GetChild(parent, index);
+            if (child is T match)
+                yield return match;
+
+            foreach (T descendant in FindVisualChildren<T>(child))
+                yield return descendant;
+        }
+    }
+
+    private static void RunOnSta(Action action)
+    {
+        Exception? failure = null;
+        var thread = new Thread(() =>
+        {
+            try
+            {
+                action();
+            }
+            catch (Exception exception)
+            {
+                failure = exception;
+            }
+        });
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+
+        Assert.True(thread.Join(TimeSpan.FromSeconds(20)), "WPF smoke test did not finish in time.");
+        Assert.Null(failure);
+    }
+
+    private sealed class WindowPaymentBatchService : IPaymentBatchService
+    {
+        public IReadOnlyList<PaymentMatrixRow> LoadMatrix(string paymentMethod) => Array.Empty<PaymentMatrixRow>();
+
+        public PaymentMatrixRow CreateDefaultMatrixRow(string paymentMethod) => new()
+        {
+            Name = "default",
+            SampleSize = 1
+        };
+
+        public Task<JsonElement> RunAsync(PaymentBatchRequest request, CancellationToken cancellationToken)
+            => throw new NotSupportedException();
+    }
+
+    private sealed class WindowPaymentBatchDialogService : IPaymentBatchDialogService
+    {
+        public bool ShowDialog(Window owner, IEnumerable<PaymentBatchAccount> accounts) => false;
+    }
+
+    private sealed class WindowSettingsDialogService : ISettingsDialogService
+    {
+        public bool ShowDialog(Window owner) => false;
+    }
+}
