@@ -17,6 +17,8 @@ public sealed class ApplicationPathsTests
 
             Assert.Equal(root, paths.RootDirectory);
             Assert.Equal(Path.Combine(root, "chatgpt_phone_reg.py"), paths.BackendScriptPath);
+            Assert.Equal(Path.Combine(root, "run_direct.vbs"), paths.StandaloneLauncherPath);
+            Assert.Equal(Path.Combine(root, "runtime", "webview2"), paths.StandaloneWebViewDataDirectory);
         }
         finally
         {

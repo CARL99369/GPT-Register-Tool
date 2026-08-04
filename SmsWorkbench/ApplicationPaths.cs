@@ -6,6 +6,8 @@ namespace SmsWorkbench
     {
         string RootDirectory { get; }
         string BackendScriptPath { get; }
+        string StandaloneLauncherPath { get; }
+        string StandaloneWebViewDataDirectory { get; }
     }
 
     public sealed class ApplicationPaths : IApplicationPaths
@@ -14,11 +16,17 @@ namespace SmsWorkbench
         {
             RootDirectory = FindRepositoryRoot(baseDirectory);
             BackendScriptPath = Path.Combine(RootDirectory, "chatgpt_phone_reg.py");
+            StandaloneLauncherPath = Path.Combine(RootDirectory, "run_direct.vbs");
+            StandaloneWebViewDataDirectory = Path.Combine(RootDirectory, "runtime", "webview2");
         }
 
         public string RootDirectory { get; }
 
         public string BackendScriptPath { get; }
+
+        public string StandaloneLauncherPath { get; }
+
+        public string StandaloneWebViewDataDirectory { get; }
 
         private static string FindRepositoryRoot(string baseDirectory)
         {

@@ -8,11 +8,17 @@ internal sealed class TestApplicationPaths : IApplicationPaths
     {
         RootDirectory = rootDirectory;
         BackendScriptPath = Path.Combine(rootDirectory, "chatgpt_phone_reg.py");
+        StandaloneLauncherPath = Path.Combine(rootDirectory, "run_direct.vbs");
+        StandaloneWebViewDataDirectory = Path.Combine(rootDirectory, "runtime", "webview2");
     }
 
     public string RootDirectory { get; }
 
     public string BackendScriptPath { get; }
+
+    public string StandaloneLauncherPath { get; }
+
+    public string StandaloneWebViewDataDirectory { get; }
 }
 
 internal sealed class StubBackendClient : IBackendClient
