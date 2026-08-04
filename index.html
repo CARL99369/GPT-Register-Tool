@@ -105,6 +105,13 @@
       <div id="batchSummary" class="batch-summary" hidden></div>
     </section>
   </main>
+  <dialog id="errorDetailDialog" class="error-detail-dialog">
+    <div class="error-detail-dialog__head">
+      <div><b id="errorDetailTitle">失败详情</b><small>完整错误信息与执行诊断</small></div>
+      <button id="errorDetailCloseButton" class="secondary small" type="button">关闭</button>
+    </div>
+    <pre id="errorDetailText" class="error-detail-dialog__text"></pre>
+  </dialog>
   <script src="/static/direct-bind.js?v=20260804-51"></script>
 </body>
 </html>

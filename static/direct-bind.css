@@ -90,7 +90,7 @@ button:disabled { opacity:.42; cursor:not-allowed; }
 .account-row { grid-template-columns:auto minmax(0,1fr) auto; align-items:center; }
 .account-row__summary { display:grid; grid-template-columns:minmax(360px,32%) minmax(300px,1fr) auto; gap:14px; align-items:center; min-width:0; }
 .task-row__account { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.account-row__current-step { min-width:0; margin:0; overflow:hidden; color:#91abc5; text-overflow:ellipsis; white-space:nowrap; }
+.account-row__current-step { min-width:0; margin:0; color:#91abc5; white-space:normal; overflow-wrap:anywhere; }
 .account-row__current-step.is-error { color:var(--danger); }
 button.task-row__link { display:inline; margin:0; padding:0; border:0; border-radius:0; background:none; color:var(--accent); font:12px ui-monospace,Consolas,monospace; white-space:nowrap; }
 button.task-row__link:hover { text-decoration:underline; }
@@ -99,3 +99,9 @@ button.task-row__link:hover { text-decoration:underline; }
 @media(max-width:680px){ .account-row { grid-template-columns:auto 1fr; } .account-row__summary { grid-template-columns:1fr; gap:3px; } .account-row-actions { grid-column:2; justify-content:flex-start; } }
 .task-row__proxy { margin-top:5px; color:#7fa4c5; font:11px ui-monospace,Consolas,monospace; word-break:break-all; }
 .task-row__billing { margin-top:6px; color:#f4ca72; font:11px ui-monospace,Consolas,monospace; word-break:break-word; }
+.error-detail-dialog { width:min(760px,calc(100% - 32px)); max-height:min(78vh,720px); padding:0; border:1px solid #35516d; border-radius:16px; background:#0b192b; color:var(--text); box-shadow:0 24px 80px #0009; }
+.error-detail-dialog::backdrop { background:#020814aa; }
+.error-detail-dialog__head { display:flex; justify-content:space-between; align-items:flex-start; gap:16px; padding:16px 18px; border-bottom:1px solid #29415c; }
+.error-detail-dialog__head b { display:block; color:var(--danger); font-size:16px; }
+.error-detail-dialog__head small { display:block; margin-top:3px; color:var(--muted); }
+.error-detail-dialog__text { max-height:calc(78vh - 86px); margin:0; overflow:auto; padding:18px; white-space:pre-wrap; overflow-wrap:anywhere; color:#d8e6f5; font:13px/1.65 ui-monospace,Consolas,"Microsoft YaHei",monospace; }

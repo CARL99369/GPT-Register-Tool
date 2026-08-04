@@ -680,6 +680,29 @@ class StandaloneTests(unittest.TestCase):
         self.assertIn("void message;", source)
         self.assertIn("errorText.startsWith(stageLabel)", source)
 
+    def test_failed_account_details_are_not_clipped(self):
+        page = (ROOT / "index.html").read_text(encoding="utf-8-sig")
+        source = (ROOT / "static" / "direct-bind.js").read_text(encoding="utf-8-sig")
+        style = (ROOT / "static" / "direct-bind.css").read_text(encoding="utf-8-sig")
+        self.assertIn('id="errorDetailDialog"', page)
+        self.assertIn("查看详情", source)
+        self.assertIn("errorDetailDialog", source)
+        self.assertIn("overflow-wrap:anywhere", style)
+        self.assertIn("white-space:normal", style)
+        self.assertNotIn(".account-row__current-step { min-width:0; margin:0; overflow:hidden; color:#91abc5; text-overflow:ellipsis; white-space:nowrap; }", style)
+
+    def test_fingerprint_hydration_preserves_payment_failure(self):
+        source = (ROOT / "static" / "direct-bind.js").read_text(encoding="utf-8-sig")
+        allocate_one = source.split("async function allocateAccountFingerprint", 1)[1].split("async function allocateFingerprints", 1)[0]
+        allocate_batch = source.split("async function allocateFingerprints", 1)[1].split("async function hydrateMissingFingerprints", 1)[0]
+        self.assertIn("if (account.status === 'idle') account.error = '';", allocate_one)
+        self.assertIn("if (account.status === 'idle') account.error = translateError", allocate_one)
+        self.assertIn("if (account.status === 'idle') account.error = '';", allocate_batch)
+        self.assertIn(
+            "if (account.status === 'idle') {\n            account.stage = previousStages.get(account.id) || '待执行';\n            account.error = message;",
+            allocate_batch,
+        )
+
     def test_health_and_info_are_standalone(self):
         server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)

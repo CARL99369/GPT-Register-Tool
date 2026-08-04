@@ -528,6 +528,28 @@
     return '待执行';
   }
 
+  function showErrorDetail(account) {
+    const dialog = $('errorDetailDialog');
+    const text = $('errorDetailText');
+    if (!dialog || !text) return;
+    const failedSteps = (account.steps || [])
+      .filter((step) => step.status === 'error' || step.detail)
+      .map((step) => `${step.label || step.key || '步骤'}：${step.detail || step.status}`);
+    const diagnostics = [
+      account.stage ? `当前步骤：${account.stage}` : '',
+      account.error ? `失败原因：${account.error}` : '',
+      failedSteps.length ? `执行步骤：\n${failedSteps.join('\n')}` : '',
+      account.bindProxyLabel ? `绑卡/支付代理：${account.bindProxyLabel}` : '',
+      account.promoProxyLabel ? `提链代理：${account.promoProxyLabel}` : '',
+      account.fingerprint ? `指纹：${account.fingerprint}` : '',
+      account.billing ? `账单：${account.billing.city || ''}, ${account.billing.state || ''} ${account.billing.postal_code || ''}` : '',
+    ].filter(Boolean);
+    $('errorDetailTitle').textContent = `${account.email || '账号'} · 失败详情`;
+    text.textContent = diagnostics.join('\n\n') || '没有可显示的失败详情。';
+    if (typeof dialog.showModal === 'function') dialog.showModal();
+    else dialog.setAttribute('open', '');
+  }
+
   function renderAccounts() {
     if (accountRenderFrame) {
       window.cancelAnimationFrame(accountRenderFrame);
@@ -596,6 +618,15 @@
       const tag = document.createElement('span');
       tag.className = 'tag';
       tag.textContent = accountStatusLabel(account);
+      if (account.status === 'error') {
+        const details = document.createElement('button');
+        details.type = 'button';
+        details.className = 'secondary small';
+        details.textContent = '查看详情';
+        details.title = '查看完整失败信息';
+        details.addEventListener('click', () => showErrorDetail(account));
+        actions.appendChild(details);
+      }
       const remove = document.createElement('button');
       remove.type = 'button';
       remove.className = 'at-row__remove';
@@ -617,6 +648,16 @@
     $('selectAllAccounts').indeterminate = selected > 0 && selected < state.accounts.length;
     saveAccounts();
   }
+
+  $('errorDetailCloseButton')?.addEventListener('click', () => {
+    const dialog = $('errorDetailDialog');
+    if (dialog?.open) dialog.close();
+    else dialog?.removeAttribute('open');
+  });
+
+  $('errorDetailDialog')?.addEventListener('click', (event) => {
+    if (event.target === event.currentTarget) event.currentTarget.close?.();
+  });
 
   async function allocateAccountFingerprint(account, { quiet = false, deferRender = false } = {}) {
     const previousStage = account.stage;
@@ -645,11 +686,11 @@
       account.fingerprintRegion = String(payload.region || '');
       account.fingerprintTimezone = String(payload.timezone || '');
       if (account.status === 'idle') account.stage = '环境已就绪';
-      account.error = '';
+      if (account.status === 'idle') account.error = '';
       if (!quiet) appendLog(`${account.email || account.id}：注册指纹 ${account.fingerprintId} 已分配。`);
     } catch (error) {
       if (account.status === 'idle') account.stage = previousStage || '待执行';
-      account.error = translateError(error?.message || error);
+      if (account.status === 'idle') account.error = translateError(error?.message || error);
     }
     saveAccounts();
     if (!deferRender) scheduleRenderAccounts();
@@ -689,8 +730,10 @@
         chunk.forEach((account) => {
           const item = byId.get(account.id) || {};
           if (item.ok === false || !item.fingerprint_id) {
-            account.stage = previousStages.get(account.id) || '待执行';
-            account.error = translateError(item.error || '批量指纹分配结果缺失');
+            if (account.status === 'idle') {
+              account.stage = previousStages.get(account.id) || '待执行';
+              account.error = translateError(item.error || '批量指纹分配结果缺失');
+            }
             return;
           }
           account.email = item.email || account.email;
@@ -701,13 +744,15 @@
           account.fingerprintRegion = String(item.region || '');
           account.fingerprintTimezone = String(item.timezone || '');
           if (account.status === 'idle') account.stage = '环境已就绪';
-          account.error = '';
+          if (account.status === 'idle') account.error = '';
         });
       } catch (error) {
         const message = translateError(error?.message || error);
         chunk.forEach((account) => {
-          account.stage = previousStages.get(account.id) || '待执行';
-          account.error = message;
+          if (account.status === 'idle') {
+            account.stage = previousStages.get(account.id) || '待执行';
+            account.error = message;
+          }
         });
       }
     }

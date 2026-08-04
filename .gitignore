@@ -21,6 +21,7 @@ skills-lock.json
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.venv/
 *~
 *.bak
 *.bak_before_*
