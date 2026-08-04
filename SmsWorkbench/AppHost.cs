@@ -34,6 +34,17 @@ namespace SmsWorkbench
                     services.AddSingleton<IBackendClient, PythonBackendClient>();
                     services.AddSingleton<Wpf.Ui.ISnackbarService, Wpf.Ui.SnackbarService>();
                     services.AddSingleton<IFileLauncher, FileLauncher>();
+                    services.AddSingleton<IStandaloneProcessLauncher, StandaloneProcessLauncher>();
+                    services.AddSingleton<IStandaloneServiceController>(provider =>
+                    {
+                        var client = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+                        return new StandaloneServiceController(
+                            provider.GetRequiredService<IApplicationPaths>(),
+                            provider.GetRequiredService<IStandaloneProcessLauncher>(),
+                            client,
+                            TimeSpan.FromMilliseconds(500),
+                            240);
+                    });
                     services.AddSingleton<IPaymentBatchService, PaymentBatchService>();
                     services.AddSingleton<IPaymentBatchDialogService, PaymentBatchDialogService>();
                     services.AddSingleton<ISettingsService, SettingsService>();
