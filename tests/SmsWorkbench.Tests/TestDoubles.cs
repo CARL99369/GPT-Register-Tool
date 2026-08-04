@@ -42,8 +42,27 @@ internal sealed class StubBackendClient : IBackendClient
 internal sealed class StubFileLauncher : IFileLauncher
 {
     public string OpenedPath { get; private set; } = "";
+    public Uri? OpenedUri { get; private set; }
 
     public bool Exists(string path) => !string.IsNullOrWhiteSpace(path);
 
     public void Open(string path) => OpenedPath = path;
+
+    public void OpenUri(Uri uri) => OpenedUri = uri;
+}
+
+internal sealed class StubStandaloneServiceController : IStandaloneServiceController
+{
+    public Uri ServiceUri { get; init; } = new("http://127.0.0.1:5601/");
+
+    public StandaloneServiceResult Result { get; set; } = StandaloneServiceResult.Ready();
+
+    public int EnsureReadyCallCount { get; private set; }
+
+    public Task<StandaloneServiceResult> EnsureReadyAsync(CancellationToken cancellationToken = default)
+    {
+        EnsureReadyCallCount++;
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult(Result);
+    }
 }

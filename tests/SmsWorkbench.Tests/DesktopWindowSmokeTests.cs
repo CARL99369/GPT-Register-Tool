@@ -195,6 +195,8 @@ public sealed class DesktopWindowSmokeTests
             new TestApplicationPaths(rootDirectory),
             new StubBackendClient(),
             new WindowPaymentBatchDialogService(),
+            new StubStandaloneServiceController(),
+            new StubFileLauncher(),
             new Wpf.Ui.SnackbarService(),
             new WindowSettingsDialogService(),
             logger);
@@ -203,6 +205,25 @@ public sealed class DesktopWindowSmokeTests
             main.Show();
             main.UpdateLayout();
             FlushDispatcher();
+
+            var standaloneButton = Assert.IsType<Button>(main.FindName("StandalonePaymentButton"));
+            Assert.Equal(
+                "直绑支付",
+                System.Windows.Automation.AutomationProperties.GetName(standaloneButton));
+            var accountWorkspace = Assert.IsType<Grid>(main.FindName("AccountWorkspace"));
+            var standaloneWorkspace = Assert.IsType<Grid>(main.FindName("StandaloneWorkspace"));
+            Assert.Equal(Visibility.Visible, accountWorkspace.Visibility);
+            Assert.Equal(Visibility.Collapsed, standaloneWorkspace.Visibility);
+
+            accountWorkspace.Visibility = Visibility.Collapsed;
+            standaloneWorkspace.Visibility = Visibility.Visible;
+            var showAccounts = typeof(MainWindow).GetMethod(
+                "ShowAccountWorkspace_Click",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+            Assert.NotNull(showAccounts);
+            showAccounts.Invoke(main, new object[] { standaloneButton, new RoutedEventArgs() });
+            Assert.Equal(Visibility.Visible, accountWorkspace.Visibility);
+            Assert.Equal(Visibility.Collapsed, standaloneWorkspace.Visibility);
 
             var accountGrid = Assert.IsType<DataGrid>(main.FindName("AccountGrid"));
             string[] headers = accountGrid.Columns.Select(column => column.Header?.ToString() ?? "").ToArray();

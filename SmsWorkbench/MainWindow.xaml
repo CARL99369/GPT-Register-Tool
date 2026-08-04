@@ -2,6 +2,7 @@
                  xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
                  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
                  xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+                 xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf"
                  xmlns:local="clr-namespace:SmsWorkbench"
                  xmlns:sys="clr-namespace:System;assembly=System.Runtime"
                  Title="GPT Register Tool"
@@ -457,6 +458,16 @@
                     <TextBlock Grid.Column="1" Text="协议支付提链" Style="{StaticResource SidebarLabelStyle}" FontSize="15" FontWeight="SemiBold" Foreground="{DynamicResource TextMain}"/>
                   </Grid>
                 </Button>
+                <Button x:Name="StandalonePaymentButton" AutomationProperties.Name="直绑支付" Style="{StaticResource SidebarNavButtonStyle}" Click="StandalonePayment_Click">
+                  <Grid>
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                    <Border Width="32" Height="32" CornerRadius="10" Background="{DynamicResource PanelBg}" BorderBrush="{DynamicResource Line}" BorderThickness="1" VerticalAlignment="Center">
+                      <Path Width="17" Height="17" Stretch="Uniform" Stroke="{DynamicResource TextSub}" StrokeThickness="1.4" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round" Fill="Transparent" HorizontalAlignment="Center" VerticalAlignment="Center"
+                            Data="M2 5h20v14H2z M2 9h20 M6 15h4"/>
+                    </Border>
+                    <TextBlock Grid.Column="1" Text="直绑支付" Style="{StaticResource SidebarLabelStyle}" FontSize="15" FontWeight="SemiBold" Foreground="{DynamicResource TextMain}"/>
+                  </Grid>
+                </Button>
                 <Button x:Name="BatchPaymentButton" AutomationProperties.Name="批量协议支付" Style="{StaticResource SidebarNavButtonStyle}" Click="BatchProtocolPayment_Click">
                   <Grid>
                     <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
@@ -578,7 +589,7 @@
           </Border>
         </Grid>
 
-        <Grid Grid.Column="1" Margin="14,0,14,10">
+        <Grid x:Name="AccountWorkspace" Grid.Column="1" Margin="14,0,14,10">
           <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
@@ -924,6 +935,58 @@ Loaded="TaskGrid_Loaded">
 
           <Border Grid.Row="5" Background="{DynamicResource StatusBg}" BorderBrush="{DynamicResource Line}" BorderThickness="0,1,0,0">
             <TextBlock Margin="8,3" Text="{Binding StatusText}" Foreground="{DynamicResource TextSub}"/>
+          </Border>
+        </Grid>
+
+        <Grid x:Name="StandaloneWorkspace" Grid.Column="1" Margin="14,0,14,10" Visibility="Collapsed">
+          <Grid.RowDefinitions>
+            <RowDefinition Height="52"/>
+            <RowDefinition Height="*"/>
+          </Grid.RowDefinitions>
+
+          <Border Grid.Row="0" Margin="0,0,0,10" Padding="10,0" CornerRadius="8" Background="{DynamicResource PanelBg}" BorderBrush="{DynamicResource Line}" BorderThickness="1">
+            <Grid>
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+              </Grid.ColumnDefinitions>
+              <Button Grid.Column="0" Width="34" Height="34" Padding="0" Style="{StaticResource IconButton}" Click="ShowAccountWorkspace_Click" ToolTip="返回账号列表">
+                <Path Width="15" Height="15" Stretch="Uniform" Stroke="{DynamicResource TextSub}" StrokeThickness="1.6" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round" Fill="Transparent" Data="M15 18l-6-6 6-6"/>
+              </Button>
+              <StackPanel Grid.Column="1" Margin="10,0,0,0" VerticalAlignment="Center">
+                <TextBlock Text="直绑支付" FontSize="15" FontWeight="SemiBold" Foreground="{DynamicResource TextMain}"/>
+                <TextBlock x:Name="StandaloneStatusText" Text="尚未连接" FontSize="11" Foreground="{DynamicResource TextMuted}" Margin="0,2,0,0"/>
+              </StackPanel>
+              <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+                <Button Width="34" Height="34" Margin="0,0,6,0" Padding="0" Style="{StaticResource IconButton}" Click="ReloadStandalone_Click" ToolTip="重新加载">
+                  <Path Width="15" Height="15" Stretch="Uniform" Stroke="{DynamicResource TextSub}" StrokeThickness="1.6" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round" Fill="Transparent" Data="M20 11a8 8 0 1 0-2.34 5.66 M20 4v7h-7"/>
+                </Button>
+                <Button Width="34" Height="34" Padding="0" Style="{StaticResource IconButton}" Click="OpenStandaloneExternally_Click" ToolTip="在浏览器中打开">
+                  <Path Width="15" Height="15" Stretch="Uniform" Stroke="{DynamicResource TextSub}" StrokeThickness="1.6" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round" Fill="Transparent" Data="M14 3h7v7 M10 14L21 3 M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+                </Button>
+              </StackPanel>
+            </Grid>
+          </Border>
+
+          <Border Grid.Row="1" CornerRadius="8" Background="{DynamicResource PanelBg}" BorderBrush="{DynamicResource Line}" BorderThickness="1" ClipToBounds="True">
+            <Grid>
+              <wv2:WebView2 x:Name="StandaloneWebView" Visibility="Hidden" NavigationCompleted="StandaloneWebView_NavigationCompleted"/>
+
+              <Grid x:Name="StandaloneLoadingPanel" Background="{DynamicResource PanelBg}">
+                <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
+                  <ProgressBar Width="220" Height="4" IsIndeterminate="True"/>
+                  <TextBlock x:Name="StandaloneLoadingText" Text="正在启动直绑服务..." Margin="0,14,0,0" HorizontalAlignment="Center" Foreground="{DynamicResource TextSub}"/>
+                </StackPanel>
+              </Grid>
+
+              <Grid x:Name="StandaloneErrorPanel" Background="{DynamicResource PanelBg}" Visibility="Collapsed">
+                <StackPanel Width="420" MaxWidth="420" HorizontalAlignment="Center" VerticalAlignment="Center">
+                  <TextBlock x:Name="StandaloneErrorText" Text="直绑支付服务不可用。" TextWrapping="Wrap" TextAlignment="Center" Foreground="{DynamicResource TextSub}"/>
+                  <Button Content="重试" Width="96" Height="34" Margin="0,16,0,0" HorizontalAlignment="Center" Click="RetryStandalone_Click"/>
+                </StackPanel>
+              </Grid>
+            </Grid>
           </Border>
         </Grid>
       </Grid>

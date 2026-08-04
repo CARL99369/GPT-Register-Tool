@@ -8,6 +8,8 @@ namespace SmsWorkbench
         private readonly IBackendClient backendClient;
         private readonly Serilog.ILogger logger;
         private readonly IPaymentBatchDialogService paymentBatchDialogs;
+        private readonly IStandaloneServiceController standaloneServiceController;
+        private readonly IFileLauncher fileLauncher;
         private readonly Wpf.Ui.ISnackbarService snackbarService;
         private readonly ISettingsDialogService settingsDialogs;
         private static readonly ConfigComboOption[] BillingRegionOptions = new[]
@@ -202,16 +204,21 @@ namespace SmsWorkbench
             IApplicationPaths paths,
             IBackendClient backendClient,
             IPaymentBatchDialogService paymentBatchDialogs,
+            IStandaloneServiceController standaloneServiceController,
+            IFileLauncher fileLauncher,
             Wpf.Ui.ISnackbarService snackbarService,
             ISettingsDialogService settingsDialogs,
             Serilog.ILogger logger)
         {
             this.backendClient = backendClient;
             this.paymentBatchDialogs = paymentBatchDialogs;
+            this.standaloneServiceController = standaloneServiceController;
+            this.fileLauncher = fileLauncher;
             this.snackbarService = snackbarService;
             this.settingsDialogs = settingsDialogs;
             this.logger = logger;
             rootDir = paths.RootDirectory;
+            standaloneWebViewDataDirectory = paths.StandaloneWebViewDataDirectory;
             InitializeComponent();
             snackbarService.SetSnackbarPresenter(SnackbarPresenter);
             DataContext = this;
