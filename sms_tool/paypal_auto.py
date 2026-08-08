@@ -849,8 +849,8 @@ def _poll_sms_code(api_url: str, baseline: dict, timeout: int = 120, poll_interv
                             print(f"\n[*] SMS code received (new message): {code}")
                             return code
 
-        except Exception as e:
-            print(f"[sms poll error: {e}]")
+        except Exception as exc:
+            print(f"[sms poll error: {type(exc).__name__}]")
 
         remaining = int(deadline - time.time())
         print(f". [{attempt}/{timeout//poll_interval}]", end="", flush=True)

@@ -1,3 +1,4 @@
+import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -7,6 +8,7 @@ from sms_tool import mailbox as mailbox_module
 from sms_tool import mailbox_url_html
 from sms_tool.codex_oauth import _mailbox_from_data
 from sms_tool.mail_otp import _email_otp_candidate
+from sms_tool.mailbox_parsers import _parse_chatai_mailbox_file, _parse_url_html_line
 from sms_tool.mailbox_types import MailboxAccount
 from sms_tool.mailbox_url_html import parse_url_html_messages
 from sms_tool.registration import _mailbox_snapshot
@@ -19,6 +21,52 @@ def _otp(mailbox, message):
         keyword="verification|login code",
     )
     return candidate["otp"] if candidate else None
+
+
+@pytest.mark.parametrize(
+    ("line", "expected_email", "expected_url"),
+    [
+        (
+            "35_dells.search@icloud.com----------https://mail.example.test/share/one",
+            "35_dells.search@icloud.com",
+            "https://mail.example.test/share/one",
+        ),
+        (
+            "yachts.motors_2w@icloud.com-------https://mail.example.test/share/two",
+            "yachts.motors_2w@icloud.com",
+            "https://mail.example.test/share/two",
+        ),
+        (
+            "wonder.aspects_6e@icloud.com------https://mail.example.test/share/three",
+            "wonder.aspects_6e@icloud.com",
+            "https://mail.example.test/share/three",
+        ),
+    ],
+)
+def test_url_html_mailbox_accepts_four_or_more_separator_hyphens(
+    line, expected_email, expected_url
+):
+    mailbox = _parse_url_html_line(line, "mailboxes.txt", 1)
+
+    assert mailbox is not None
+    assert mailbox.provider == "url_html"
+    assert mailbox.email == expected_email
+    assert mailbox.inbox_url == expected_url
+
+
+def test_mailbox_file_loader_prioritizes_url_html_over_chongzhi_separator(tmp_path):
+    source = tmp_path / "mailboxes.txt"
+    source.write_text(
+        "user@icloud.com----------https://mail.example.test/share/token\n",
+        encoding="utf-8",
+    )
+
+    records = _parse_chatai_mailbox_file(source)
+
+    assert len(records) == 1
+    assert records[0].provider == "url_html"
+    assert records[0].inbox_url == "https://mail.example.test/share/token"
+    assert mailbox_module.mailbox_has_inbox_credentials(records[0])
 
 
 def test_parses_details_mail_card():
@@ -119,6 +167,89 @@ class FakeResponse:
         self.closed = True
 
 
+def test_fetches_arkasm_share_mailbox_through_public_api():
+    share_url = "https://icloud.arkasm.cn/share/test-share-token"
+    inbox_api = (
+        "https://icloud.arkasm.cn/api/public/share/test-share-token/"
+        "inbox?limit=25&days=7"
+    )
+    message_api = (
+        "https://icloud.arkasm.cn/api/public/share/test-share-token/"
+        "message?uid=42&folder=INBOX"
+    )
+    calls = []
+
+    def json_response(payload):
+        response = FakeResponse()
+        response.headers = {"Content-Type": "application/json; charset=utf-8"}
+        response.payload = json.dumps(payload).encode("utf-8")
+        return response
+
+    def fake_get(url, **kwargs):
+        calls.append((url, kwargs))
+        if url == inbox_api:
+            return json_response({
+                "success": True,
+                "data": {
+                    "alias": "user@icloud.com",
+                    "count": 1,
+                    "method": "imap",
+                    "messages": [{
+                        "id": "42",
+                        "from": "OpenAI <noreply@tm.openai.com>",
+                        "to": "user@icloud.com",
+                        "subject": "Your ChatGPT verification code",
+                        "date": "2026-08-08T17:36:50+08:00",
+                        "preview": "Enter this temporary code to continue.",
+                        "folder": "INBOX",
+                    }],
+                },
+            })
+        if url == message_api:
+            return json_response({
+                "success": True,
+                "data": {
+                    "id": "42",
+                    "from": "OpenAI <noreply@tm.openai.com>",
+                    "to": "user@icloud.com",
+                    "subject": "Your ChatGPT verification code",
+                    "date": "2026-08-08T17:36:50+08:00",
+                    "preview": "Enter this temporary code to continue.",
+                    "body": "Enter this temporary verification code: 482731",
+                    "content_type": "text/plain",
+                },
+            })
+        response = FakeResponse()
+        response.payload = b'<html><body><div id="root"></div></body></html>'
+        return response
+
+    mailbox = MailboxAccount(
+        email="user@icloud.com",
+        provider="url_html",
+        inbox_url=share_url,
+    )
+
+    messages = mailbox_url_html.fetch_url_html_messages(
+        mailbox,
+        proxy="http://127.0.0.1:7897",
+        http_get=fake_get,
+    )
+
+    assert [url for url, _ in calls] == [inbox_api, message_api]
+    assert all(
+        kwargs["proxies"] == {
+            "http": "http://127.0.0.1:7897",
+            "https": "http://127.0.0.1:7897",
+        }
+        for _, kwargs in calls
+    )
+    assert messages[0]["id"] == "arkasm:42"
+    assert messages[0]["toRecipients"] == [
+        {"emailAddress": {"address": "user@icloud.com"}}
+    ]
+    assert _otp(mailbox, messages[0]) == "482731"
+
+
 def test_fetch_honors_proxy_follows_redirects_and_returns_messages():
     calls = []
 
@@ -197,6 +328,28 @@ def test_url_provider_credentials_fetch_and_snapshot(monkeypatch):
     assert mailbox_module._fetch_mailbox_messages(mailbox) == [old]
     assert mailbox_module._snapshot_mailbox_message(mailbox) == "old"
     assert mailbox.seen_message_ids == ("old",)
+
+
+def test_url_provider_retries_direct_when_mailbox_proxy_fails(monkeypatch):
+    mailbox = MailboxAccount(
+        email="user@icloud.com",
+        provider="url_html",
+        inbox_url="https://example.test/inbox",
+    )
+    expected = [{"id": "new", "subject": "ChatGPT login code"}]
+    calls = []
+
+    def fetch(_mailbox, limit=25, proxy=""):
+        calls.append(proxy)
+        if proxy:
+            raise mailbox_url_html.UrlHtmlMailboxError("proxy TLS failed")
+        return expected
+
+    monkeypatch.setattr(mailbox_url_html, "fetch_url_html_messages", fetch)
+    monkeypatch.setattr(mailbox_module, "_resolve_mailbox_proxy", lambda proxy=None: "http://proxy.test:8080")
+
+    assert mailbox_module._fetch_mailbox_messages(mailbox) == expected
+    assert calls == ["http://proxy.test:8080", ""]
 
 
 def test_url_poll_ignores_baseline_and_returns_new_code(monkeypatch):

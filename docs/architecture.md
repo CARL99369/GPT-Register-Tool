@@ -74,6 +74,7 @@ sms_tool/
   phone_proxy.py            Phone verification proxy resolution.
   phone_reuse.py            Phone number reuse and inventory management.
   smsbower.py               SMSBower SMS provider activation and polling.
+  sms66.py                  SMS66 persistent-number purchase and SMS polling.
   sms_provider.py           SMS provider abstraction layer.
   proxy_pool.py             SOCKS5 proxy pool server with health checking.
   session_refresh.py        Refresh auth session after manual login/payment.
@@ -110,7 +111,7 @@ runtime/                    SQLite, debug output, caches, ignored by Git.
 | Desktop buttons/dialogs | `SmsWorkbench/` | `chatgpt_phone_reg.py`, SQLite/session read-only display helpers, read-only SMSBower catalog lookup | ChatGPT activation lifecycle, payment protocol, mailbox polling loops |
 | CLI command routing | `sms_tool.cli` | Focused command modules | Provider protocol internals or long-lived state mutation outside handlers |
 | Mailbox parsing/polling | `sms_tool.mailbox`, `sms_tool.providers/*` | Microsoft Graph, Gmail IMAP/SMTP, mailbox provider clients | Registration success persistence, payment state |
-| Phone inventory | `sms_tool.phone_reuse`, `sms_tool.smsbower` | SMS provider APIs | ChatGPT account state, payment state |
+| Phone inventory | `sms_tool.phone_reuse`, `sms_tool.smsbower`, `sms_tool.sms66` | SMS provider APIs | ChatGPT account state, payment state |
 | ChatGPT registration | `sms_tool.registration`, `sms_tool.registration_concurrency` | mailbox/phone seams, stage resource gates, storage through result writers | Payment execution, CPA upload |
 | Auth/session refresh | `sms_tool.codex_oauth`, `sms_tool.session_refresh` | mailbox OTP seam, phone seam when explicitly enabled | Phone inventory purchasing outside configured provider seam |
 | Account liveness | `sms_tool.account_liveness` | account seed data, `/backend-api/wham/usage` | Persistence, OAuth relogin, payment creation |

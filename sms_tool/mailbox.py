@@ -449,11 +449,21 @@ def _fetch_mailbox_messages(mailbox, limit=25, proxy=None, include_body=False):
     # Fall back to local Graph API / IMAP on any failure.
     provider = str(getattr(mailbox, "provider", "") or "")
     if provider == "url_html":
-        return mailbox_url_html.fetch_url_html_messages(
-            mailbox,
-            limit=limit,
-            proxy=proxy,
-        )
+        try:
+            return mailbox_url_html.fetch_url_html_messages(
+                mailbox,
+                limit=limit,
+                proxy=proxy,
+            )
+        except mailbox_url_html.UrlHtmlMailboxError:
+            if not proxy:
+                raise
+            print("[URL mailbox proxy failed; retrying direct]")
+            return mailbox_url_html.fetch_url_html_messages(
+                mailbox,
+                limit=limit,
+                proxy="",
+            )
     if provider == "chongzhi" or (mailbox_chongzhi.chongzhi_enabled(_email_cfg()) and getattr(mailbox, "password", "")):
         email = str(getattr(mailbox, "email", "") or "").strip()
         password = str(getattr(mailbox, "password", "") or "").strip()

@@ -79,6 +79,56 @@ class OneClickSmsCliTests(unittest.TestCase):
         self.assertEqual(captured["mailbox"]["token"], "client-id")
         self.assertEqual(captured["mailbox"]["refresh_token"], "refresh-token")
 
+    def test_one_click_sms_loads_and_forwards_explicit_phone_pool(self):
+        class FakePhonePool:
+            phones = [object()]
+            total_capacity = 1
+
+            def reset_exhausted_smsbower_slots(self):
+                return None
+
+        args = Namespace(
+            email="user@example.com",
+            email_file=None,
+            session_file=None,
+            chatai_mailbox_file=None,
+            mailbox_file=None,
+            max_reuse_count=5,
+            phone_send_cooldown=None,
+            phone_source="phone_pool",
+            phone_pool_file="C:/Temp/pool.json",
+            workers=1,
+            refresh_timeout=60,
+            proxy=None,
+        )
+        entry = {
+            "phone": "+19862940168",
+            "sms_api_url": "http://sms66.vip/apisms/token",
+        }
+
+        with (
+            patch("sms_tool.phone_reuse.load_phone_pool_entries", return_value=[entry]) as load,
+            patch("sms_tool.phone_reuse.create_phone_pool", return_value=FakePhonePool()) as create,
+            patch("sms_tool.phone_reuse.print_phone_pool_status"),
+            patch(
+                "sms_tool.session_refresh._load_seed_session",
+                return_value=({"email": "user@example.com"}, ""),
+            ),
+            patch(
+                "sms_tool.codex_oauth.refresh_codex_oauth_session",
+                return_value={"ok": True, "refresh_token_status": "updated"},
+            ),
+        ):
+            cli._one_click_sms(args)
+
+        load.assert_called_once_with("C:/Temp/pool.json")
+        create.assert_called_once_with(
+            max_reuse_count=1,
+            send_cooldown_seconds=None,
+            source_override="phone_pool",
+            explicit_entries=[entry],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

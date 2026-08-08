@@ -292,6 +292,23 @@
       "send_cooldown_seconds": 45,
       "send_retry_attempts": 3,
       "send_retry_delay_seconds": 45
+    },
+    "sms66": {
+      "api_key": "$SMS66_API_KEY",
+      "endpoint": "https://app.yuntl.cc",
+      "project_id": "480",
+      "country_id": "1",
+      "duration": "",
+      "phone_prefix": "",
+      "designated_phone": "",
+      "pool_size": 1,
+      "max_reuse_count": 5,
+      "sms_timeout": 120,
+      "sms_poll_interval": 5,
+      "number_attempts": 1,
+      "send_cooldown_seconds": 0,
+      "send_retry_attempts": 1,
+      "send_retry_delay_seconds": 0
     }
   },
   "output": {

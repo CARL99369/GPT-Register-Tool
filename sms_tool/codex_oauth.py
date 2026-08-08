@@ -23,9 +23,10 @@ AUTH_URL = "https://auth.openai.com/oauth/authorize"
 TOKEN_URL = "https://auth.openai.com/oauth/token"
 CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 REDIRECT_URI = "http://localhost:1455/auth/callback"
-SCOPE = "openid profile email offline_access"
+SCOPE = "openid profile email offline_access api.connectors.read api.connectors.invoke"
+ORIGINATOR = "codex_cli_rs"
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/110.0.0.0 Safari/537.36"
-LOGIN_EMAIL_OTP_SUBJECT_KEYWORD = "login code"
+LOGIN_EMAIL_OTP_SUBJECT_KEYWORD = "login code|登录代码|验证码|临时登录代码|临时验证码|ログインコード|認証コード|一時的な認証コード|登入代碼|驗證碼|로그인 코드|인증 코드"
 
 
 def refresh_codex_oauth_session(
@@ -83,6 +84,15 @@ def collect_codex_oauth_tokens(
         return {"ok": False, "mode": "codex_oauth_pkce", "error": "missing_email"}
     oauth = _new_oauth_request()
     if session is None:
+        device_id = str(data.get("device_id") or "").strip() or secrets.token_hex(16)
+        data["device_id"] = device_id
+        sentinel = _ensure_oauth_sentinel(device_id=device_id, proxy=proxy)
+        if not sentinel:
+            return {
+                "ok": False,
+                "mode": "codex_oauth_pkce",
+                "error": "oauth_sentinel_extract_failed",
+            }
         session = curl_requests.Session()
         if proxy:
             session.proxies = {"http": proxy, "https": proxy}
@@ -117,6 +127,27 @@ def collect_codex_oauth_tokens(
         return {"ok": False, "mode": "codex_oauth_pkce", "error": str(exc)}
 
 
+def _ensure_oauth_sentinel(device_id, proxy=None):
+    from .sentinel_tokens import (
+        _extract_sentinel_http,
+        _extract_sentinel_quickjs,
+        _get_cached_sentinel,
+        _sentinel_device_id,
+    )
+
+    did = str(device_id or "").strip()
+    cached = _get_cached_sentinel()
+    if cached and _sentinel_device_id(cached) == did:
+        return cached
+
+    print("[*] Preparing device-bound Sentinel for Codex OAuth...")
+    for extractor in (_extract_sentinel_quickjs, _extract_sentinel_http):
+        sentinel = extractor(proxy=proxy, persist=True, device_id=did)
+        if sentinel and _sentinel_device_id(sentinel) == did:
+            return sentinel
+    return {}
+
+
 def _login_and_exchange(
     session,
     oauth,
@@ -131,7 +162,11 @@ def _login_and_exchange(
 ):
     max_restarts = 2
     for restart_attempt in range(max_restarts + 1):
-        did = str(data.get("device_id") or "").strip() or _cookie_value(session, "oai-did") or secrets.token_hex(16)
+        did = (
+            secrets.token_hex(16)
+            if restart_attempt > 0
+            else str(data.get("device_id") or "").strip() or _cookie_value(session, "oai-did") or secrets.token_hex(16)
+        )
         try:
             session.cookies.set("oai-did", did, domain="auth.openai.com", path="/")
         except Exception:
@@ -139,10 +174,14 @@ def _login_and_exchange(
         sentinel = load_cached_sentinel()
         headers = _oai_headers(did, {"Referer": current_url or AUTH_URL, "content-type": "application/json"})
         attach_sentinel(headers, sentinel)
+        otp_issued_after_unix = int(time.time())
         start_resp = session.post(
             "https://auth.openai.com/api/accounts/authorize/continue",
             headers=headers,
-            json={"username": {"value": email, "kind": "email"}},
+            json={
+                "username": {"value": email, "kind": "email"},
+                "screen_hint": "login_or_signup",
+            },
             timeout=30,
             impersonate=auth_impersonate(),
             allow_redirects=False,
@@ -171,14 +210,25 @@ def _login_and_exchange(
             force_email_otp_login=force_email_otp_login,
             phone_pool=phone_pool,
             phone_probe_only=phone_probe_only,
+            initial_otp_requested=True,
+            otp_issued_after_unix=otp_issued_after_unix,
         )
         if not result.get("needs_session_restart") or restart_attempt >= max_restarts:
             return result
         print(f"[*] Session state invalid, restarting auth flow (attempt {restart_attempt + 1}/{max_restarts})")
+        _clear_auth_session_cookies(session)
         try:
-            session.cookies.clear(domain="auth.openai.com")
-        except Exception:
-            pass
+            oauth = _new_oauth_request()
+            _, current_url = _follow_redirects(session, oauth["auth_url"], proxy=proxy)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "mode": "codex_oauth_pkce",
+                "error": f"oauth_session_restart_failed:{exc}",
+                "needs_session_restart": True,
+            }
+        if _has_callback_code(current_url):
+            return {"ok": True, "tokens": _exchange_callback(current_url, oauth, proxy=proxy)}
     return result
 
 
@@ -194,6 +244,8 @@ def _run_protocol_login_stages(
     force_email_otp_login=False,
     phone_pool=None,
     phone_probe_only=False,
+    initial_otp_requested=False,
+    otp_issued_after_unix=None,
 ):
     allow_takeover = bool(force_email_otp_login or _allow_passwordless_takeover())
     stage = _detect_protocol_stage(current_url)
@@ -225,6 +277,8 @@ def _run_protocol_login_stages(
             reason="email_otp_required" if _needs_email_otp(current_url) else "email_otp_forced",
             phone_pool=phone_pool,
             phone_probe_only=phone_probe_only,
+            initial_otp_requested=initial_otp_requested,
+            otp_issued_after_unix=otp_issued_after_unix,
         )
         if email_otp_result.get("ok"):
             email_otp_result.setdefault("protocol_stage", "email_otp")
@@ -316,6 +370,8 @@ def _passwordless_login_and_exchange(
     reason="",
     phone_pool=None,
     phone_probe_only=False,
+    initial_otp_requested=False,
+    otp_issued_after_unix=None,
 ):
     mailbox = _mailbox_from_data(data)
     if mailbox is None:
@@ -327,33 +383,68 @@ def _passwordless_login_and_exchange(
             "last_url": _safe_url(current_url),
         }
 
-    issued_after = int(time.time())
-    send_result = _send_passwordless_otp(session, did, current_url)
-    if send_result.get("hard_error"):
+    prime_result = _prime_email_verification_page(session, did, current_url)
+    if not prime_result.get("ok"):
         return {
             "ok": False,
             "mode": "codex_oauth_pkce",
-            "error": send_result.get("error", "passwordless_send_failed"),
+            "error": "email_verification_page_failed",
             "fallback_from": reason,
-            "last_url": _safe_url(current_url),
+            "last_url": _safe_url(prime_result.get("url") or current_url),
+            "body": prime_result.get("error") or "",
+            "needs_session_restart": True,
         }
 
+    issued_after = int(otp_issued_after_unix or time.time())
+    pending_send = False
+    if initial_otp_requested:
+        delivery_attempts = [{"operation": "authorize_continue", "status_code": 200}]
+    else:
+        # Compatibility path for callers that enter the verification page
+        # without going through /authorize/continue in this process.
+        send_result = _send_passwordless_otp(session, did, current_url)
+        delivery_attempts = [
+            {"operation": "send", "status_code": int(send_result.get("status_code") or 0)}
+        ]
+        pending_send = int(send_result.get("status_code") or 0) == 409
+        if send_result.get("needs_session_restart"):
+            return {
+                "ok": False,
+                "mode": "codex_oauth_pkce",
+                "error": send_result.get("error") or "passwordless_send_invalid_state",
+                "fallback_from": reason,
+                "last_url": _safe_url(current_url),
+                "body": send_result.get("body") or "",
+                "needs_session_restart": True,
+            }
+        if send_result.get("hard_error"):
+            return {
+                "ok": False,
+                "mode": "codex_oauth_pkce",
+                "error": send_result.get("error", "passwordless_send_failed"),
+                "fallback_from": reason,
+                "last_url": _safe_url(current_url),
+            }
+
     attempts = max(1, min(int((CFG.get("email_registration") or {}).get("max_otp_retries") or 3), 5))
+    total_poll_timeout = min(max(int(timeout or 180), 1), 300)
+    attempt_poll_timeout = max(1, total_poll_timeout // attempts)
     last_error = ""
     last_validate_body = ""
     for attempt in range(attempts):
         if attempt > 0:
-            resend_issued_after = int(time.time())
             resend_result = _resend_email_otp(session, did, current_url)
-            if int(resend_result.get("status_code") or 0) == 200:
-                issued_after = resend_issued_after
-            elif int(resend_result.get("status_code") or 0) == 409:
+            delivery_attempts.append(
+                {"operation": "resend", "status_code": int(resend_result.get("status_code") or 0)}
+            )
+            if int(resend_result.get("status_code") or 0) == 409:
+                pending_send = True
                 print("[*] Email OTP resend already pending; keeping previous OTP search window")
         try:
             code = _poll_email_otp(
                 mailbox,
                 subject_keyword=LOGIN_EMAIL_OTP_SUBJECT_KEYWORD,
-                timeout=min(max(int(timeout or 180), 30), 300),
+                timeout=attempt_poll_timeout,
                 issued_after_unix=issued_after,
                 proxy=proxy,
             )
@@ -430,13 +521,26 @@ def _passwordless_login_and_exchange(
                 "fallback_from": reason,
                 "last_url": _safe_url(current_url),
             }
+    delivery_accepted = any(item["status_code"] == 200 for item in delivery_attempts)
+    delivery_error = last_error or "passwordless_email_otp_failed"
+    delivery_message = ""
+    if last_error == "passwordless_email_otp_poll_timeout" and delivery_accepted:
+        delivery_error = "passwordless_email_otp_not_delivered"
+        delivery_message = (
+            "OpenAI accepted the email OTP request, but the mailbox did not receive "
+            "a new verification message within the configured timeout."
+        )
+        print("[*] Email OTP request accepted, but no new mailbox message was delivered")
     return {
         "ok": False,
         "mode": "codex_oauth_pkce",
-        "error": last_error or "passwordless_email_otp_failed",
+        "error": delivery_error,
         "fallback_from": reason,
         "last_url": _safe_url(current_url),
         "body": last_validate_body,
+        "message": delivery_message,
+        "otp_delivery": {"attempts": delivery_attempts},
+        "needs_session_restart": bool(pending_send and last_error == "passwordless_email_otp_poll_timeout"),
     }
 
 
@@ -496,30 +600,102 @@ def _password_login_and_exchange(session, oauth, data, did, current_url, proxy=N
     return final
 
 
+def _prime_email_verification_page(session, did, current_url):
+    """Load the verification page before issuing the first OTP request."""
+    if not _needs_email_otp(current_url):
+        return {"ok": True, "url": current_url, "skipped": True}
+    url = _absolute_url("https://auth.openai.com", current_url)
+    try:
+        response = request_with_retry(
+            session,
+            "get",
+            url,
+            label="Email verification page",
+            headers=with_sentinel(
+                _oai_headers(
+                    did,
+                    {
+                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                        "Referer": url,
+                    },
+                ),
+                load_cached_sentinel(),
+            ),
+            allow_redirects=False,
+            impersonate=auth_impersonate(),
+        )
+        status = int(getattr(response, "status_code", 0) or 0)
+        print(f"[*] Email verification page: {status}")
+        location = ""
+        try:
+            location = urllib.parse.urljoin(url, str((response.headers or {}).get("Location") or ""))
+        except Exception:
+            location = ""
+        if status in (200, 204, 304) or _needs_email_otp(location):
+            return {"ok": True, "status_code": status, "url": url}
+        return {"ok": False, "status_code": status, "url": location or url}
+    except Exception as exc:
+        print(f"[WARN] Email verification page failed: {exc}")
+        return {"ok": False, "url": url, "error": str(exc)}
+
+
+def _email_otp_request_headers(did, referer, sentinel):
+    return with_sentinel(
+        _oai_headers(
+            did,
+            {
+                "Accept": "*/*",
+                "Origin": "https://auth.openai.com",
+                "Referer": referer or "https://auth.openai.com/email-verification",
+                "content-type": "application/json",
+                "Sec-Fetch-Dest": "empty",
+                "Sec-Fetch-Mode": "cors",
+                "Sec-Fetch-Site": "same-origin",
+            },
+        ),
+        sentinel,
+    )
+
+
 def _send_passwordless_otp(session, did, current_url):
     sentinel = load_cached_sentinel()
+    pending_result = None
     for endpoint in (
-        "https://auth.openai.com/api/accounts/passwordless/send-otp",
         "https://auth.openai.com/api/accounts/email-otp/send",
+        "https://auth.openai.com/api/accounts/passwordless/send-otp",
     ):
         try:
             response = session.post(
                 endpoint,
-                headers=with_sentinel(
-                    _oai_headers(did, {"Referer": current_url, "content-type": "application/json"}),
-                    sentinel,
-                ),
+                headers=_email_otp_request_headers(did, current_url, sentinel),
                 json={},
                 timeout=30,
                 impersonate=auth_impersonate(),
             )
             if response.status_code == 200:
-                print(f"[*] Passwordless OTP send accepted: {endpoint.rsplit('/', 1)[-1]}")
-                return {"ok": True, "endpoint": endpoint}
+                detail = _otp_response_detail(response)
+                print(f"[*] Passwordless OTP send accepted: {endpoint.rsplit('/', 1)[-1]}{detail}")
+                return {
+                    "ok": True,
+                    "endpoint": endpoint,
+                    "status_code": response.status_code,
+                    "body": response.text[:300],
+                }
             print(f"[*] Passwordless OTP send skipped: {endpoint.rsplit('/', 1)[-1]} {response.status_code}")
+            if _is_invalid_auth_state_response(response.status_code, response.text):
+                print("[*] Passwordless OTP auth session is invalid; restarting OAuth flow")
+                return {
+                    "ok": False,
+                    "endpoint": endpoint,
+                    "status_code": response.status_code,
+                    "error": "passwordless_send_invalid_state",
+                    "body": response.text[:300],
+                    "needs_session_restart": True,
+                }
             if response.status_code == 409:
-                print("[*] Passwordless OTP send already pending; continuing to mailbox polling")
-                return {"ok": True, "endpoint": endpoint, "status_code": response.status_code}
+                pending_result = {"ok": True, "endpoint": endpoint, "status_code": response.status_code}
+                print("[*] Passwordless OTP send already pending; trying compatible send endpoint")
+                continue
             if response.status_code not in (400, 404, 405):
                 return {
                     "ok": False,
@@ -529,6 +705,9 @@ def _send_passwordless_otp(session, did, current_url):
                 }
         except Exception as exc:
             return {"ok": False, "hard_error": True, "error": f"passwordless_send_error:{exc}"}
+    if pending_result is not None:
+        print("[*] Passwordless OTP send remains pending; continuing to mailbox polling")
+        return pending_result
     return {"ok": False, "error": "passwordless_send_unavailable"}
 
 
@@ -537,16 +716,18 @@ def _resend_email_otp(session, did, current_url):
     try:
         response = session.post(
             "https://auth.openai.com/api/accounts/email-otp/resend",
-            headers=with_sentinel(
-                _oai_headers(did, {"Referer": "https://auth.openai.com/email-verification", "content-type": "application/json"}),
-                sentinel,
-            ),
+            headers=_email_otp_request_headers(did, "https://auth.openai.com/email-verification", sentinel),
             json={},
             timeout=20,
             impersonate=auth_impersonate(),
         )
-        print(f"[*] Email OTP resend: {response.status_code}")
-        return {"ok": response.status_code in (200, 409), "status_code": response.status_code}
+        detail = _otp_response_detail(response)
+        print(f"[*] Email OTP resend: {response.status_code}{detail}")
+        return {
+            "ok": response.status_code in (200, 409),
+            "status_code": response.status_code,
+            "body": response.text[:300],
+        }
     except Exception:
         return {"ok": False, "status_code": 0}
 
@@ -765,6 +946,7 @@ def _new_oauth_request():
         "code_challenge_method": "S256",
         "id_token_add_organizations": "true",
         "codex_cli_simplified_flow": "true",
+        "originator": ORIGINATOR,
     }
     return {
         "state": state,
@@ -1020,6 +1202,36 @@ def _is_account_deactivated_response(status_code, text):
     )
 
 
+def _is_invalid_auth_state_response(status_code, text):
+    if int(status_code or 0) not in (400, 409):
+        return False
+    body = str(text or "").lower()
+    return "invalid_state" in body or "sign-in session is no longer valid" in body
+
+
+def _otp_response_detail(response):
+    parts = []
+    try:
+        body = response.json()
+    except Exception:
+        body = {}
+    if isinstance(body, dict):
+        if "success" in body:
+            parts.append(f"success={str(bool(body.get('success'))).lower()}")
+        error = body.get("error") if isinstance(body.get("error"), dict) else {}
+        code = str(error.get("code") or "").strip()
+        if code:
+            parts.append(f"code={code}")
+    try:
+        raw_retry_after = (response.headers or {}).get("Retry-After")
+        retry_after = str(raw_retry_after).strip() if isinstance(raw_retry_after, (str, int, float)) else ""
+    except Exception:
+        retry_after = ""
+    if retry_after:
+        parts.append(f"retry_after={retry_after}")
+    return f" ({', '.join(parts)})" if parts else ""
+
+
 def _has_callback_code(url):
     text = str(url or "")
     return "code=" in text and "state=" in text
@@ -1030,6 +1242,14 @@ def _cookie_value(session, name):
         return session.cookies.get(name) or ""
     except Exception:
         return ""
+
+
+def _clear_auth_session_cookies(session):
+    for domain in ("auth.openai.com", ".auth.openai.com", ".openai.com", "openai.com"):
+        try:
+            session.cookies.clear(domain=domain)
+        except Exception:
+            pass
 
 
 def _parse_workspace_from_auth_cookie(auth_cookie):

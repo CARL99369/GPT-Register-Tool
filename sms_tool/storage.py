@@ -291,13 +291,13 @@ def _oauth_refresh_token(data, auth_session):
         _nested_token(auth_session, "session", "refreshToken"),
     )
     for token in candidates:
-        if _looks_codex_refresh_token(token):
+        if looks_codex_refresh_token(token):
             return token
     return ""
 
 
-def _looks_codex_refresh_token(token):
-    return str(token or "").strip().startswith("rt_")
+def looks_codex_refresh_token(token):
+    return str(token or "").strip().startswith(("rt_", "rt."))
 
 
 def _refresh_token_status(data, auth_session):
@@ -306,7 +306,7 @@ def _refresh_token_status(data, auth_session):
         return "oauth_present"
     if explicit and explicit != "oauth_present":
         return explicit
-    if _looks_codex_refresh_token(_get(data, "refresh_token")):
+    if looks_codex_refresh_token(_get(data, "refresh_token")):
         return "legacy_present"
     return "no_rt"
 

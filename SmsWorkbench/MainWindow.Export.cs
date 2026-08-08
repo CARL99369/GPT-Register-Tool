@@ -660,11 +660,7 @@ namespace SmsWorkbench
                 return false;
             }
 
-            Dictionary<string, object> source = data;
-            if (TryGetMap(data, "auth_session", out Dictionary<string, object> authSession) && authSession.Count > 0)
-            {
-                source = authSession;
-            }
+            Dictionary<string, object> source = AccountExportState.SelectSource(data);
 
             if (CloneExportJsonValue(source) is not Dictionary<string, object> clean || clean.Count == 0)
             {

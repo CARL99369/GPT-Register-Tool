@@ -105,6 +105,30 @@ class StorageDedupTests(unittest.TestCase):
         self.assertEqual(row["paypal_status"], "link_ready")
         self.assertNotIn("passwordless_email_otp_poll_timeout", row["raw_json"])
 
+    def test_upsert_recognizes_versioned_codex_refresh_token(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "accounts.sqlite3"
+            with patch.object(storage, "database_path", return_value=db_path):
+                self.assertTrue(storage.upsert_account({
+                    "email": "versioned-rt@example.com",
+                    "success": True,
+                    "access_token": "at",
+                    "oauth_refresh_token": "rt.1.real-token-shape",
+                    "refresh_token_status": "oauth_present",
+                }))
+
+                conn = storage._connect()
+                try:
+                    row = conn.execute(
+                        "SELECT refresh_token_status,oauth_refresh_token FROM accounts WHERE email=?",
+                        ("versioned-rt@example.com",),
+                    ).fetchone()
+                finally:
+                    conn.close()
+
+        self.assertEqual(row["refresh_token_status"], "oauth_present")
+        self.assertEqual(row["oauth_refresh_token"], "rt.1.real-token-shape")
+
     def test_upsert_does_not_treat_mailbox_refresh_token_as_codex_rt(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "accounts.sqlite3"

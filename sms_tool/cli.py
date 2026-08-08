@@ -86,16 +86,20 @@ def _registration_phone_pool(args):
 
     from .phone_reuse import create_phone_pool, has_phone_reuse_config, print_phone_pool_status
 
-    explicit = bool(getattr(args, "phone_reuse", False))
-    auto_enable = has_phone_reuse_config()
+    explicit_entries = _explicit_phone_pool_entries(args)
+    explicit = bool(getattr(args, "phone_reuse", False) or explicit_entries is not None)
+    auto_enable = has_phone_reuse_config() or explicit_entries is not None
     if not explicit and not auto_enable:
         return None
 
-    phone_pool = create_phone_pool(
+    pool_options = dict(
         max_reuse_count=getattr(args, "max_reuse_count", 0),
         send_cooldown_seconds=getattr(args, "phone_send_cooldown", None),
         source_override=getattr(args, "phone_source", None),
     )
+    if explicit_entries is not None:
+        pool_options["explicit_entries"] = explicit_entries
+    phone_pool = create_phone_pool(**pool_options)
     if not phone_pool.phones:
         if explicit:
             print("[Error] --phone-reuse enabled but no phone numbers configured. Add phone_reuse.smsbower.api_key, SMSBOWER_API_KEY, phone_reuse.phone_pool, or paypal_auto.phone_numbers")
@@ -108,6 +112,23 @@ def _registration_phone_pool(args):
         print(f"[*] Auto-enabled phone verification ({source} mode)")
     print_phone_pool_status(phone_pool)
     return phone_pool
+
+
+def _explicit_phone_pool_entries(args):
+    path = str(getattr(args, "phone_pool_file", "") or "").strip()
+    if not path:
+        return None
+    if getattr(args, "phone_source", None) != "phone_pool":
+        print("[Error] --phone-pool-file requires --phone-source phone_pool")
+        raise SystemExit(2)
+
+    from .phone_reuse import load_phone_pool_entries
+
+    try:
+        return load_phone_pool_entries(path)
+    except ValueError as exc:
+        print(f"[Error] {exc}")
+        raise SystemExit(2) from exc
 
 
 def _payment_country(payment_method: str, explicit: str = "") -> str:
@@ -386,7 +407,8 @@ def main():
     parser.add_argument("--registration-at-only", action="store_true", help="Registration stores ChatGPT AT only; skip Codex OAuth RT and phone verification")
     parser.add_argument("--phone-reuse", action="store_true", help="Enable phone number reuse: one phone verifies up to N accounts")
     parser.add_argument("--no-phone-reuse", action="store_true", help="Disable phone verification even when smsbower is configured")
-    parser.add_argument("--phone-source", default=None, choices=["smsbower", "phone_pool"], help="Override phone source for registration/one-click SMS")
+    parser.add_argument("--phone-source", default=None, choices=["smsbower", "sms66", "phone_pool"], help="Override phone source for registration/one-click SMS")
+    parser.add_argument("--phone-pool-file", default=None, help="JSON phone/SMS URL entries for this process; requires --phone-source phone_pool")
     parser.add_argument("--max-reuse-count", type=int, default=0, help="Max times a phone can be reused (0=config default or 1)")
     parser.add_argument("--phone-send-cooldown", type=int, default=None, help="Seconds to wait before sending another OTP to the same phone")
     args = parser.parse_args()
@@ -1922,11 +1944,15 @@ def _one_click_sms(args):
         }
 
     one_click_max_reuse = _one_click_sms_max_reuse(args)
-    phone_pool = create_phone_pool(
+    explicit_entries = _explicit_phone_pool_entries(args)
+    pool_options = dict(
         max_reuse_count=one_click_max_reuse,
         send_cooldown_seconds=args.phone_send_cooldown,
         source_override=args.phone_source,
     )
+    if explicit_entries is not None:
+        pool_options["explicit_entries"] = explicit_entries
+    phone_pool = create_phone_pool(**pool_options)
     if not phone_pool.phones:
         print("[Error] --one-click-sms requires a phone pool. Configure phone_reuse.smsbower.api_key/SMSBOWER_API_KEY or phone_reuse.phone_pool.")
         raise SystemExit(2)

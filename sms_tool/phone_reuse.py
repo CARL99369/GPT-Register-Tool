@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 from .config import CFG
 from .smsbower import (
@@ -26,6 +27,7 @@ from .smsbower import (
     normalize_phone,
     normalize_service,
 )
+from .sms66 import DEFAULT_ENDPOINT as SMS66_DEFAULT_ENDPOINT, Sms66Client
 from .auth_headers import openai_auth_headers_lower
 from .sms_provider import SmsProviderAdapter, provider_name
 
@@ -63,6 +65,10 @@ class PhoneSlot:
     send_retry_delay_seconds: int = 0
     number_attempts: int = 3
     last_sms_code: str = ""
+    project_id: str = ""
+    duration: str = ""
+    phone_prefix: str = ""
+    designated_phone: str = ""
 
     @property
     def is_exhausted(self) -> bool:
@@ -215,6 +221,10 @@ def _state_for_phone(phone: PhoneSlot) -> dict:
         "send_retry_delay_seconds": phone.send_retry_delay_seconds,
         "number_attempts": phone.number_attempts,
         "last_sms_code": phone.last_sms_code,
+        "project_id": phone.project_id,
+        "duration": phone.duration,
+        "phone_prefix": phone.phone_prefix,
+        "designated_phone": phone.designated_phone,
     }
 
 
@@ -234,6 +244,12 @@ def _saved_state_matches_slot(phone: PhoneSlot, saved: dict) -> bool:
             and (not saved_min_price or saved_min_price == str(phone.min_price or "").strip())
             and (not saved_max_price or saved_max_price == str(phone.max_price or "").strip())
             and (not saved_provider_ids or saved_provider_ids == str(phone.provider_ids or "").strip())
+        )
+    if phone.provider == "sms66":
+        return (
+            (not saved.get("project_id") or str(saved.get("project_id")) == str(phone.project_id))
+            and (not saved.get("country") or str(saved.get("country")) == str(phone.country))
+            and (not phone.designated_phone or normalize_phone(saved.get("designated_phone") or saved.get("phone") or "") == normalize_phone(phone.designated_phone))
         )
     saved_phone = normalize_phone(saved.get("phone") or "")
     if saved_phone and saved_phone != normalize_phone(phone.phone):
@@ -291,6 +307,11 @@ def _smsbower_api_key(cfg: dict | None = None) -> str:
     return _resolve_secret(str(cfg.get("api_key") or ""), "SMSBOWER_API_KEY")
 
 
+def _sms66_api_key(cfg: dict | None = None) -> str:
+    cfg = cfg if isinstance(cfg, dict) else (_phone_reuse_cfg().get("sms66") or {})
+    return _resolve_secret(str(cfg.get("api_key") or ""), "SMS66_API_KEY")
+
+
 def has_phone_reuse_config() -> bool:
     cfg = _phone_reuse_cfg()
     source = _phone_source(cfg)
@@ -299,8 +320,14 @@ def has_phone_reuse_config() -> bool:
     if source == "smsbower":
         smsbower_cfg = cfg.get("smsbower") if isinstance(cfg.get("smsbower"), dict) else {}
         return bool(_smsbower_api_key(smsbower_cfg))
+    if source == "sms66":
+        sms66_cfg = cfg.get("sms66") if isinstance(cfg.get("sms66"), dict) else {}
+        return bool(_sms66_api_key(sms66_cfg))
     smsbower_cfg = cfg.get("smsbower") if isinstance(cfg.get("smsbower"), dict) else {}
     if _smsbower_api_key(smsbower_cfg):
+        return True
+    sms66_cfg = cfg.get("sms66") if isinstance(cfg.get("sms66"), dict) else {}
+    if _sms66_api_key(sms66_cfg):
         return True
     if cfg.get("phone_pool"):
         return True
@@ -315,6 +342,8 @@ def _phone_source(cfg: dict | None = None) -> str:
     source = str(cfg.get("source") or cfg.get("mode") or "auto").strip().lower()
     if source in {"smsbower", "sms_bower", "platform", "provider"}:
         return "smsbower"
+    if source in {"sms66", "sms_66"}:
+        return "sms66"
     if source in {"phone_pool", "static", "legacy", "sms_link", "link"}:
         return "phone_pool"
     return "auto"
@@ -324,9 +353,12 @@ def create_phone_pool(
     max_reuse_count: int = 0,
     send_cooldown_seconds: int | None = None,
     source_override: str | None = None,
+    explicit_entries: list[dict] | None = None,
 ) -> PhonePool:
     cfg = _phone_reuse_cfg()
     source = _phone_source({"source": source_override}) if source_override else _phone_source(cfg)
+    if explicit_entries is not None:
+        source = "phone_pool"
     max_reuse = max_reuse_count or _int_value(cfg.get("max_reuse_count"), 1)
     send_cooldown = (
         max(0, int(send_cooldown_seconds))
@@ -339,8 +371,9 @@ def create_phone_pool(
     phones: list[PhoneSlot] = []
 
     smsbower_cfg = cfg.get("smsbower") if isinstance(cfg.get("smsbower"), dict) else {}
+    sms66_cfg = cfg.get("sms66") if isinstance(cfg.get("sms66"), dict) else {}
     api_key = _smsbower_api_key(smsbower_cfg)
-    if api_key and source != "phone_pool":
+    if explicit_entries is None and api_key and source in {"smsbower", "auto"}:
         pool_size = max(1, _int_value(smsbower_cfg.get("pool_size"), 1))
         service = normalize_service(smsbower_cfg.get("service") or OPENAI_SERVICE_CODE)
         country = smsbower_cfg.get("country") or GHANA_COUNTRY_CODE
@@ -366,13 +399,46 @@ def create_phone_pool(
                 number_attempts=_int_value(smsbower_cfg.get("number_attempts"), number_attempts),
             ))
 
-    if not phones and source != "smsbower":
+    sms66_api_key = _sms66_api_key(sms66_cfg)
+    if explicit_entries is None and sms66_api_key and source == "sms66":
+        pool_size = max(1, _int_value(sms66_cfg.get("pool_size"), 1))
+        project_id = str(sms66_cfg.get("project_id") or sms66_cfg.get("app_id") or "480").strip()
+        country_id = str(sms66_cfg.get("country_id") or "1").strip()
+        sms66_max_reuse = max(1, _int_value(sms66_cfg.get("max_reuse_count"), max_reuse))
+        for index in range(pool_size):
+            phones.append(PhoneSlot(
+                phone="",
+                provider="sms66",
+                api_key=sms66_api_key,
+                endpoint=str(sms66_cfg.get("endpoint") or SMS66_DEFAULT_ENDPOINT).strip() or SMS66_DEFAULT_ENDPOINT,
+                service=project_id,
+                country=country_id,
+                project_id=project_id,
+                duration=str(sms66_cfg.get("duration") or "").strip(),
+                phone_prefix="".join(ch for ch in str(sms66_cfg.get("phone_prefix") or "") if ch.isdigit()),
+                designated_phone=normalize_phone(sms66_cfg.get("designated_phone") or ""),
+                max_reuse_count=sms66_max_reuse,
+                slot_id=f"sms66:{index}",
+                sms_timeout=_int_value(sms66_cfg.get("sms_timeout"), 120),
+                sms_poll_interval=_int_value(sms66_cfg.get("sms_poll_interval"), 5),
+                send_cooldown_seconds=_int_value(sms66_cfg.get("send_cooldown_seconds"), send_cooldown),
+                send_retry_attempts=_int_value(sms66_cfg.get("send_retry_attempts"), send_retries),
+                send_retry_delay_seconds=_int_value(sms66_cfg.get("send_retry_delay_seconds"), send_retry_delay),
+                number_attempts=_int_value(sms66_cfg.get("number_attempts"), number_attempts),
+            ))
+
+    if explicit_entries is not None:
+        for index, entry in enumerate(explicit_entries):
+            slot = _slot_from_static_entry(entry, max_reuse, f"import:{index}")
+            if slot:
+                phones.append(slot)
+    elif not phones and source not in {"smsbower", "sms66"}:
         for index, entry in enumerate(cfg.get("phone_pool") or []):
             slot = _slot_from_static_entry(entry, max_reuse, f"phone_pool:{index}")
             if slot:
                 phones.append(slot)
 
-    if not phones and source != "smsbower":
+    if explicit_entries is None and not phones and source not in {"smsbower", "sms66"}:
         paypal_cfg = CFG.get("paypal_auto") if isinstance(CFG.get("paypal_auto"), dict) else {}
         phone_numbers = paypal_cfg.get("phone_numbers") or []
         for index, entry in enumerate(phone_numbers):
@@ -396,9 +462,42 @@ def create_phone_pool(
                     send_retry_delay_seconds=send_retry_delay,
                 ))
 
-    pool = PhonePool(phones=phones, state_file=str(cfg.get("state_file") or "runtime/phone_reuse_state.json"))
+    state_file = "" if explicit_entries is not None else str(cfg.get("state_file") or "runtime/phone_reuse_state.json")
+    pool = PhonePool(phones=phones, state_file=state_file)
     pool.load_state()
     return pool
+
+
+def load_phone_pool_entries(path: str | Path) -> list[dict]:
+    source = Path(path)
+    try:
+        payload = json.loads(source.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"unable to load phone pool file: {exc}") from exc
+    if not isinstance(payload, list):
+        raise ValueError("phone pool file must contain a JSON array")
+
+    entries: list[dict] = []
+    for index, item in enumerate(payload):
+        if not isinstance(item, dict):
+            raise ValueError(f"phone pool entry {index + 1} is invalid")
+        phone = normalize_phone(item.get("phone") or "")
+        digits = phone.removeprefix("+")
+        sms_api_url = str(item.get("sms_api_url") or "").strip()
+        parsed_url = urlparse(sms_api_url)
+        if (
+            len(digits) < 7
+            or len(digits) > 15
+            or not digits.isdigit()
+            or parsed_url.scheme.lower() not in {"http", "https"}
+            or not parsed_url.netloc
+        ):
+            raise ValueError(f"phone pool entry {index + 1} is invalid")
+        entries.append({"phone": phone, "sms_api_url": sms_api_url})
+
+    if not entries:
+        raise ValueError("phone pool file contains no entries")
+    return entries
 
 
 def _slot_from_static_entry(entry: dict, max_reuse: int, slot_id: str) -> Optional[PhoneSlot]:
@@ -421,6 +520,31 @@ def _slot_from_static_entry(entry: dict, max_reuse: int, slot_id: str) -> Option
             target_price=str(entry.get("target_price") or "0.054").strip(),
             provider_ids=str(entry.get("provider_ids") or "").strip(),
             max_reuse_count=max_reuse,
+            slot_id=slot_id,
+            sms_timeout=_int_value(entry.get("sms_timeout"), 120),
+            sms_poll_interval=_int_value(entry.get("sms_poll_interval"), 5),
+            send_cooldown_seconds=_int_value(entry.get("send_cooldown_seconds"), _send_cooldown_seconds()),
+            send_retry_attempts=_int_value(entry.get("send_retry_attempts"), _send_retry_attempts()),
+            send_retry_delay_seconds=_int_value(entry.get("send_retry_delay_seconds"), _send_retry_delay_seconds()),
+        )
+    if provider == "sms66":
+        api_key = _resolve_secret(str(entry.get("api_key") or ""), "SMS66_API_KEY")
+        if not api_key:
+            return None
+        project_id = str(entry.get("project_id") or entry.get("app_id") or "480").strip()
+        country_id = str(entry.get("country_id") or "1").strip()
+        return PhoneSlot(
+            phone=normalize_phone(entry.get("phone") or ""),
+            provider="sms66",
+            api_key=api_key,
+            endpoint=str(entry.get("endpoint") or SMS66_DEFAULT_ENDPOINT).strip() or SMS66_DEFAULT_ENDPOINT,
+            service=project_id,
+            country=country_id,
+            project_id=project_id,
+            duration=str(entry.get("duration") or "").strip(),
+            phone_prefix="".join(ch for ch in str(entry.get("phone_prefix") or "") if ch.isdigit()),
+            designated_phone=normalize_phone(entry.get("designated_phone") or ""),
+            max_reuse_count=max(1, _int_value(entry.get("max_reuse_count"), max_reuse)),
             slot_id=slot_id,
             sms_timeout=_int_value(entry.get("sms_timeout"), 120),
             sms_poll_interval=_int_value(entry.get("sms_poll_interval"), 5),
@@ -456,6 +580,10 @@ def _country_candidates(value) -> list[str]:
 
 def _smsbower_client(slot: PhoneSlot) -> SmsBowerClient:
     return SmsBowerClient(api_key=slot.api_key, endpoint=slot.endpoint)
+
+
+def _sms66_client(slot: PhoneSlot) -> Sms66Client:
+    return Sms66Client(api_key=slot.api_key, endpoint=slot.endpoint)
 
 
 def _price_matches(left, right) -> bool:
@@ -550,6 +678,50 @@ def _prepare_smsbower_for_send(slot: PhoneSlot) -> bool:
     return _acquire_smsbower_number(slot)
 
 
+def _acquire_sms66_number(slot: PhoneSlot) -> bool:
+    client = _sms66_client(slot)
+    try:
+        app_id = slot.project_id or slot.service or "480"
+        designated_phone = normalize_phone(slot.designated_phone)
+        if not designated_phone and slot.phone_prefix:
+            prefix = "".join(ch for ch in str(slot.phone_prefix) if ch.isdigit())
+            candidates = [
+                item for item in client.get_available_numbers(app_id)
+                if normalize_phone(item.get("phone") or "").lstrip("+").startswith(prefix)
+            ]
+            if not candidates:
+                raise RuntimeError(f"no available number matches prefix {prefix}")
+            designated_phone = normalize_phone(candidates[0].get("phone") or "")
+        if designated_phone:
+            activation = client.buy_designated_number(app_id, designated_phone)
+        else:
+            activation = client.buy_number(
+                app_id=app_id,
+                country_id=str(slot.country or "1"),
+                duration=slot.duration,
+            )
+    except Exception as exc:
+        print(f"  [sms66] acquire failed: {exc}")
+        return False
+    previous_phone = slot.phone
+    slot.phone = normalize_phone(activation.phone)
+    slot.activation_id = activation.order_id
+    slot.project_id = activation.app_id
+    slot.service = activation.app_id
+    slot.country = activation.country_id or slot.country
+    if not previous_phone or previous_phone != slot.phone:
+        slot.reuse_count = 0
+        slot.last_sms_code = ""
+    print(f"  [sms66] acquired {slot.phone} (order={slot.activation_id}, app_id={slot.project_id}, country={slot.country})")
+    return True
+
+
+def _prepare_sms66_for_send(slot: PhoneSlot) -> bool:
+    if slot.phone and slot.activation_id:
+        return True
+    return _acquire_sms66_number(slot)
+
+
 def _prepare_provider_for_send(slot: PhoneSlot) -> bool:
     return _sms_provider_adapter(slot).prepare()
 
@@ -639,6 +811,16 @@ def _wait_smsbower_code(slot: PhoneSlot) -> Optional[str]:
     )
 
 
+def _wait_sms66_code(slot: PhoneSlot) -> Optional[str]:
+    return _sms66_client(slot).wait_for_code(
+        app_id=slot.project_id or slot.service or "480",
+        phone=slot.phone,
+        timeout=slot.sms_timeout,
+        poll_interval=slot.sms_poll_interval,
+        previous_code=slot.last_sms_code,
+    )
+
+
 def _reset_provider_slot(slot: PhoneSlot):
     slot.phone = ""
     slot.activation_id = ""
@@ -702,10 +884,30 @@ class _SmsBowerProviderAdapter(SmsProviderAdapter):
         _cancel_smsbower_activation(self.slot)
 
 
+class _Sms66ProviderAdapter(SmsProviderAdapter):
+    provider_key = "sms66"
+
+    def prepare(self) -> bool:
+        return _prepare_sms66_for_send(self.slot)
+
+    def wait_code(self) -> Optional[str]:
+        return _wait_sms66_code(self.slot)
+
+    def complete(self) -> None:
+        # SMS66 numbers are persistent purchases; do not release/reset them.
+        self.slot.last_sms_code = ""
+
+    def cancel(self) -> None:
+        # There is no release endpoint in the documented SMS66 API.
+        self.slot.last_sms_code = ""
+
+
 def _sms_provider_adapter(slot: PhoneSlot) -> SmsProviderAdapter:
     name = provider_name(slot)
     if name == "smsbower":
         return _SmsBowerProviderAdapter(slot)
+    if name == "sms66":
+        return _Sms66ProviderAdapter(slot)
     return _StaticSmsProviderAdapter(slot)
 
 
@@ -983,7 +1185,7 @@ def _complete_phone_verification_once_locked(
             if selected_proxy:
                 print(f"[*] Phone proxy ready: region={proxy_result.get('region', '')} ip={proxy_result.get('ip', '')}")
 
-    if phone_slot.provider == "smsbower" and not _prepare_provider_for_send(phone_slot):
+    if phone_slot.provider in {"smsbower", "sms66"} and not _prepare_provider_for_send(phone_slot):
         return {"ok": False, "error": f"{phone_slot.provider}_prepare_failed", "phone": phone_slot.phone}
 
     phone = normalize_phone(phone_slot.phone)

@@ -5,6 +5,7 @@ from urllib.parse import urlsplit
 from .mailbox_types import MailboxAccount
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+URL_HTML_SEPARATOR_RE = re.compile(r"-{4,}(?=https?://)", re.IGNORECASE)
 MS_CLIENT_ID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
     re.IGNORECASE,
@@ -89,9 +90,10 @@ def _parse_chongzhi_line(line, source_path, line_no):
 
 
 def _parse_url_html_line(line, source_path, line_no):
-    email_text, separator, inbox_url = str(line or "").partition("----")
-    if not separator:
+    parts = URL_HTML_SEPARATOR_RE.split(str(line or ""), maxsplit=1)
+    if len(parts) != 2:
         return None
+    email_text, inbox_url = parts
     email = _normalize_mailbox_email(email_text)
     inbox_url = inbox_url.strip()
     try:
@@ -319,16 +321,17 @@ def _parse_chatai_mailbox_file(path):
             if account:
                 records.append(account)
             continue
+        if "----" in line:
+            account = _parse_url_html_line(line, chatai_path, line_no)
+            if account:
+                records.append(account)
+                continue
         if _is_chongzhi_line(line):
             account = _parse_chongzhi_line(line, chatai_path, line_no)
             if account:
                 records.append(account)
             continue
         if "----" in line:
-            account = _parse_url_html_line(line, chatai_path, line_no)
-            if account:
-                records.append(account)
-                continue
             parts = line.split("----", 3)
             if len(parts) < 4:
                 print(f"[!] Skip malformed chatai line {chatai_path}:{line_no}")

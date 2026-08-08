@@ -15,6 +15,54 @@ public sealed class MailboxPoolFileStoreTests
     }
 
     [Fact]
+    public void ExportSourcePrefersRootCodexOAuthTokenOverNestedWebSession()
+    {
+        var webSession = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["accessToken"] = "web-access-token"
+        };
+        var root = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["access_token"] = "codex-oauth-access-token",
+            ["auth_session"] = webSession
+        };
+
+        Dictionary<string, object> selected = AccountExportState.SelectSource(root);
+
+        Assert.Same(root, selected);
+    }
+
+    [Fact]
+    public void ExportSourceFallsBackToWebSessionWithoutRootOAuthToken()
+    {
+        var webSession = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["accessToken"] = "web-access-token"
+        };
+        var root = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["auth_session"] = webSession
+        };
+
+        Dictionary<string, object> selected = AccountExportState.SelectSource(root);
+
+        Assert.Same(webSession, selected);
+    }
+
+    [Theory]
+    [InlineData("no_rt", "rt.1.oauth", "oauth_present")]
+    [InlineData("", "rt.1.oauth", "oauth_present")]
+    [InlineData("oauth_present", "", "oauth_present")]
+    [InlineData("no_rt", "", "no_rt")]
+    public void RefreshTokenStatePrefersActualOAuthTokenOverStaleStatus(
+        string storedStatus,
+        string oauthRefreshToken,
+        string expected)
+    {
+        Assert.Equal(expected, RefreshTokenState.Resolve(storedStatus, oauthRefreshToken));
+    }
+
+    [Fact]
     public void BuildReMailLineRequiresCompleteOrderIdentity()
     {
         Assert.Equal(

@@ -1,4 +1,5 @@
 import unittest
+from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
 
@@ -46,6 +47,13 @@ class SmsBowerPhoneReuseTests(unittest.TestCase):
 
         self.assertIsInstance(adapter, SmsProviderAdapter)
         self.assertEqual(adapter.provider, "smsbower")
+
+    def test_sms66_uses_common_sms_provider_adapter_contract(self):
+        slot = PhoneSlot(phone="+14155550123", provider="sms66", project_id="480", activation_id="order-1")
+        adapter = phone_reuse._sms_provider_adapter(slot)
+
+        self.assertIsInstance(adapter, SmsProviderAdapter)
+        self.assertEqual(adapter.provider, "sms66")
 
     def test_smsbower_acquire_refreshes_provider_ids_for_selected_tier(self):
         slot = PhoneSlot(
@@ -676,6 +684,67 @@ class SmsBowerPhoneReuseTests(unittest.TestCase):
         self.assertEqual(pool.phones[0].phone, "+15485091782")
         self.assertEqual(pool.phones[0].sms_api_url, "https://sms789.com/sms/by_key?key=test")
         self.assertEqual(pool.phones[0].max_reuse_count, 2)
+
+    def test_load_phone_pool_entries_and_override_configured_pool(self):
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "pool.json"
+            path.write_text(
+                '[{"phone":"+19862940168","sms_api_url":"http://sms66.vip/apisms/token"}]',
+                encoding="utf-8",
+            )
+            entries = phone_reuse.load_phone_pool_entries(path)
+            cfg = {
+                "phone_reuse": {
+                    "source": "phone_pool",
+                    "state_file": str(Path(tmp) / "saved.json"),
+                    "phone_pool": [
+                        {"phone": "+10000000000", "sms_api_url": "https://old.test/code"}
+                    ],
+                }
+            }
+            with patch.dict(phone_reuse.CFG, cfg, clear=False):
+                pool = create_phone_pool(
+                    source_override="phone_pool",
+                    explicit_entries=entries,
+                )
+
+        self.assertEqual(pool.state_file, "")
+        self.assertEqual(len(pool.phones), 1)
+        self.assertEqual(pool.phones[0].slot_id, "import:0")
+        self.assertEqual(pool.phones[0].phone, "+19862940168")
+        self.assertEqual(pool.phones[0].sms_api_url, "http://sms66.vip/apisms/token")
+
+    def test_load_phone_pool_entries_rejects_non_array(self):
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "pool.json"
+            path.write_text('{"phone":"+19862940168"}', encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "JSON array"):
+                phone_reuse.load_phone_pool_entries(path)
+
+    def test_load_phone_pool_entries_rejects_invalid_entry_without_url_secret(self):
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "pool.json"
+            path.write_text(
+                '[{"phone":"+19862940168","sms_api_url":"file:///apisms/private-token"}]',
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "entry 1 is invalid") as raised:
+                phone_reuse.load_phone_pool_entries(path)
+
+        self.assertNotIn("private-token", str(raised.exception))
+
+    def test_load_phone_pool_entries_rejects_invalid_phone(self):
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "pool.json"
+            path.write_text(
+                '[{"phone":"abc","sms_api_url":"https://example.test/code"}]',
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "entry 1 is invalid"):
+                phone_reuse.load_phone_pool_entries(path)
 
     def test_phone_source_smsbower_ignores_static_links(self):
         with TemporaryDirectory() as tmp:

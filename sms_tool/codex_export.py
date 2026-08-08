@@ -11,7 +11,7 @@ from .config import CFG
 from .codex_oauth import refresh_codex_oauth_session
 from .paths import output_dir
 from .session_refresh import _load_seed_session, _session_token, refresh_session
-from .storage import upsert_account
+from .storage import looks_codex_refresh_token, upsert_account
 
 
 def export_codex_session(
@@ -63,7 +63,7 @@ def export_codex_session(
     if not codex_json.get("email"):
         codex_json["email"] = target_email
 
-    if require_refresh_token and not str(codex_json.get("refresh_token") or "").strip().startswith("rt_"):
+    if require_refresh_token and not looks_codex_refresh_token(codex_json.get("refresh_token")):
         return {
             "ok": False,
             "email": target_email,
@@ -379,7 +379,7 @@ def _openai_refresh_token(data, auth_session):
     ]
     for value in candidates:
         token = str(value or "").strip()
-        if token.startswith("rt_"):
+        if looks_codex_refresh_token(token):
             return token
     return ""
 

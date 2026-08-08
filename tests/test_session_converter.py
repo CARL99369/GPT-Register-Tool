@@ -56,6 +56,51 @@ class SessionConverterTests(unittest.TestCase):
         axon = conv.build_output_document("axonhub", result["converted"])
         self.assertEqual(axon["tokens"]["refresh_token"], conv.AXONHUB_PLACEHOLDER_REFRESH_TOKEN)
 
+    def test_sub2api_export_preserves_oauth_refresh_token(self):
+        access = _jwt({
+            "exp": 1787060529,
+            "https://api.openai.com/auth": {"chatgpt_account_id": "acct-rt", "chatgpt_plan_type": "plus"},
+            "https://api.openai.com/profile": {"email": "rt@example.com", "user_id": "user-rt"},
+        })
+        record = {
+            "user": {"id": "user-rt", "email": "rt@example.com"},
+            "account": {"id": "acct-rt", "planType": "plus"},
+            "accessToken": access,
+            "oauth_refresh_token": "rt.1.example",
+        }
+
+        result = conv.convert_json_value(record, fmt="sub2api")
+
+        credentials = result["output"]["accounts"][0]["credentials"]
+        self.assertEqual(credentials["refresh_token"], "rt.1.example")
+        self.assertNotIn("expires_at", result["output"]["accounts"][0])
+
+    def test_sub2api_export_prefers_root_codex_oauth_tokens_over_web_session_tokens(self):
+        oauth_access = _jwt({
+            "client_id": "codex-client",
+            "https://api.openai.com/auth": {"chatgpt_account_id": "acct-oauth"},
+            "https://api.openai.com/profile": {"email": "oauth@example.com"},
+        })
+        web_access = _jwt({
+            "client_id": "web-client",
+            "https://api.openai.com/auth": {"chatgpt_account_id": "acct-web"},
+            "https://api.openai.com/profile": {"email": "web@example.com"},
+        })
+        record = {
+            "email": "oauth@example.com",
+            "access_token": oauth_access,
+            "oauth_refresh_token": "rt.1.oauth",
+            "accessToken": web_access,
+            "refreshToken": "web-refresh-token",
+        }
+
+        result = conv.convert_json_value(record, fmt="sub2api")
+
+        credentials = result["output"]["accounts"][0]["credentials"]
+        self.assertEqual(credentials["access_token"], oauth_access)
+        self.assertEqual(credentials["refresh_token"], "rt.1.oauth")
+        self.assertEqual(credentials["chatgpt_account_id"], "acct-oauth")
+
     def test_cli_convert_session_json_writes_output(self):
         access = _jwt({
             "exp": 1782973350,

@@ -1,5 +1,6 @@
 using System;
 using System.Linq;
+using System.Text.RegularExpressions;
 
 namespace SmsWorkbench
 {
@@ -14,6 +15,9 @@ namespace SmsWorkbench
         private static readonly string[] TripleDelimiter = { "---" };
         private static readonly string[] QuadDelimiter = { "----" };
         private static readonly string[] MailboxDelimiters = { "----", "---" };
+        private static readonly Regex UrlMailboxDelimiter = new(
+            @"-{4,}(?=https?://)",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
         internal static bool TryParse(string line, out MailboxLineInfo info)
         {
@@ -21,11 +25,11 @@ namespace SmsWorkbench
             string value = (line ?? "").Trim().TrimStart('\ufeff');
             if (value.Length == 0 || value.StartsWith('#')) return false;
 
-            int delimiter = value.IndexOf("----", StringComparison.Ordinal);
-            if (delimiter > 0)
+            Match urlDelimiter = UrlMailboxDelimiter.Match(value);
+            if (urlDelimiter.Success && urlDelimiter.Index > 0)
             {
-                string email = value.Substring(0, delimiter).Trim();
-                string remainder = value.Substring(delimiter + 4).Trim();
+                string email = value.Substring(0, urlDelimiter.Index).Trim();
+                string remainder = value.Substring(urlDelimiter.Index + urlDelimiter.Length).Trim();
                 if (LooksLikeEmail(email)
                     && Uri.TryCreate(remainder, UriKind.Absolute, out Uri? uri)
                     && uri.Host.Length > 0

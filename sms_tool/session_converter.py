@@ -176,18 +176,18 @@ def collect_session_like_objects(value: Any, source_name: str = "pasted-json") -
                 return
             seen.add(marker)
             token = first_non_empty(
-                item.get("accessToken"),
                 item.get("access_token"),
-                nested(item, "tokens", "accessToken"),
+                item.get("accessToken"),
                 nested(item, "tokens", "access_token"),
-                nested(item, "token", "accessToken"),
+                nested(item, "tokens", "accessToken"),
                 nested(item, "token", "access_token"),
-                nested(item, "credentials", "accessToken"),
+                nested(item, "token", "accessToken"),
                 nested(item, "credentials", "access_token"),
-                nested(item, "auth_session", "accessToken"),
+                nested(item, "credentials", "accessToken"),
                 nested(item, "auth_session", "access_token"),
-                nested(item, "auth_session", "session", "accessToken"),
+                nested(item, "auth_session", "accessToken"),
                 nested(item, "auth_session", "session", "access_token"),
+                nested(item, "auth_session", "session", "accessToken"),
             )
             has_identity = isinstance(item.get("user"), dict) or first_non_empty(
                 item.get("email"),
@@ -230,18 +230,18 @@ def convert_session(record: dict[str, Any], now: Any | None = None, source_name:
         raise ValueError("session is not a JSON object")
 
     access_token = first_non_empty(
-        record.get("accessToken"), record.get("access_token"),
-        nested(record, "tokens", "accessToken"), nested(record, "tokens", "access_token"),
-        nested(record, "token", "accessToken"), nested(record, "token", "access_token"),
-        nested(record, "credentials", "accessToken"), nested(record, "credentials", "access_token"),
-        nested(record, "auth_session", "accessToken"), nested(record, "auth_session", "access_token"),
-        nested(record, "auth_session", "session", "accessToken"), nested(record, "auth_session", "session", "access_token"),
+        record.get("access_token"), record.get("accessToken"),
+        nested(record, "tokens", "access_token"), nested(record, "tokens", "accessToken"),
+        nested(record, "token", "access_token"), nested(record, "token", "accessToken"),
+        nested(record, "credentials", "access_token"), nested(record, "credentials", "accessToken"),
+        nested(record, "auth_session", "access_token"), nested(record, "auth_session", "accessToken"),
+        nested(record, "auth_session", "session", "access_token"), nested(record, "auth_session", "session", "accessToken"),
     )
     if not access_token:
         raise ValueError("missing accessToken")
     session_token = first_non_empty(record.get("sessionToken"), record.get("session_token"), nested(record, "tokens", "sessionToken"), nested(record, "tokens", "session_token"))
-    refresh_token = first_non_empty(record.get("refreshToken"), record.get("refresh_token"), nested(record, "tokens", "refreshToken"), nested(record, "tokens", "refresh_token"), nested(record, "token", "refreshToken"), nested(record, "token", "refresh_token"), nested(record, "credentials", "refresh_token"))
-    input_id_token = first_non_empty(record.get("idToken"), record.get("id_token"), nested(record, "tokens", "idToken"), nested(record, "tokens", "id_token"), nested(record, "token", "idToken"), nested(record, "token", "id_token"), nested(record, "credentials", "id_token"))
+    refresh_token = first_non_empty(record.get("oauth_refresh_token"), record.get("refresh_token"), record.get("refreshToken"), nested(record, "tokens", "refresh_token"), nested(record, "tokens", "refreshToken"), nested(record, "token", "refresh_token"), nested(record, "token", "refreshToken"), nested(record, "credentials", "refresh_token"))
+    input_id_token = first_non_empty(record.get("id_token"), record.get("idToken"), nested(record, "tokens", "id_token"), nested(record, "tokens", "idToken"), nested(record, "token", "id_token"), nested(record, "token", "idToken"), nested(record, "credentials", "id_token"))
 
     payload = parse_jwt_payload(access_token)
     id_payload = parse_jwt_payload(input_id_token)
@@ -315,6 +315,7 @@ def convert_session(record: dict[str, Any], now: Any | None = None, source_name:
         "priority": 1,
         "credentials": {
             "access_token": access_token,
+            "refresh_token": refresh_token,
             "chatgpt_account_id": account_id,
             "chatgpt_user_id": user_id,
             "email": email,

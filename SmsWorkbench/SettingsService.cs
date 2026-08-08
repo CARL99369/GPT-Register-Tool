@@ -88,9 +88,9 @@ namespace SmsWorkbench
                 SetPath(root, "paypal.billing_regions", ToArray(new[] { Find(fields, "paypal_billing_region").Value.Trim().ToUpperInvariant() }));
 
                 SetPath(root, "email_registration.remail.service_mode", "purchase");
-                SetPath(root, "phone_reuse.source", "smsbower");
                 SetPath(root, "phone_reuse.smsbower.service", "dr");
                 SetPath(root, "phone_reuse.smsbower.service_name", "OpenAI (ChatGPT)");
+                SetPath(root, "phone_reuse.sms66.project_id", 480);
                 RemovePath(root, "phone_reuse.smsbower.pool_size");
                 RemovePath(root, "phone_reuse.phone_pool");
                 RemovePath(root, "protocol_payments.methods.blik.blik_code");

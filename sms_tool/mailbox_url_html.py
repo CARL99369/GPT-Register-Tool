@@ -1,9 +1,10 @@
 import hashlib
+import json
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from html.parser import HTMLParser
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlencode, urlsplit
 
 import requests
 
@@ -36,6 +37,7 @@ _DATE_RE = re.compile(
     r"(?:\s*(Z|[+-]\d{2}:?\d{2}))?"
 )
 MAX_HTML_BYTES = 2 * 1024 * 1024
+_ARKASM_HOST = "icloud.arkasm.cn"
 
 
 class UrlHtmlMailboxError(RuntimeError):
@@ -296,14 +298,12 @@ def parse_url_html_messages(html, mailbox_email, limit=25):
     return unique
 
 
-def fetch_url_html_messages(mailbox, limit=25, proxy="", http_get=requests.get):
-    url = str(getattr(mailbox, "inbox_url", "") or "").strip()
-    safe_url = redact_inbox_url(url)
+def _request_text(url, safe_url, proxy, http_get, accept, content_types):
     proxies = {"http": proxy, "https": proxy} if proxy else None
     try:
         response = http_get(
             url,
-            headers={"Accept": "text/html,text/plain;q=0.9"},
+            headers={"Accept": accept},
             proxies=proxies,
             timeout=(10, 20),
             stream=True,
@@ -320,10 +320,7 @@ def fetch_url_html_messages(mailbox, limit=25, proxy="", http_get=requests.get):
             f"URL mailbox returned HTTP {response.status_code} for {safe_url}"
         )
     content_type = str(response.headers.get("Content-Type") or "").lower()
-    if not any(
-        kind in content_type
-        for kind in ("text/html", "text/plain", "application/xhtml+xml")
-    ):
+    if not any(kind in content_type for kind in content_types):
         response.close()
         raise UrlHtmlMailboxError(
             f"URL mailbox returned unsupported content for {safe_url}"
@@ -352,5 +349,127 @@ def fetch_url_html_messages(mailbox, limit=25, proxy="", http_get=requests.get):
         response.close()
 
     encoding = str(getattr(response, "encoding", "") or "utf-8")
-    html = payload.decode(encoding, errors="replace")
+    return payload.decode(encoding, errors="replace")
+
+
+def _arkasm_api_base(url):
+    try:
+        parsed = urlsplit(str(url or ""))
+    except ValueError:
+        return ""
+    if (parsed.hostname or "").lower() != _ARKASM_HOST:
+        return ""
+    match = re.fullmatch(r"/share/([^/]+)/?", parsed.path or "")
+    if not match:
+        return ""
+    token = match.group(1).strip()
+    if not token:
+        return ""
+    return (
+        f"{parsed.scheme.lower()}://{parsed.netloc}/api/public/share/"
+        f"{quote(token, safe='')}"
+    )
+
+
+def _arkasm_message(record):
+    item = record if isinstance(record, dict) else {}
+    message_id = str(item.get("id") or "").strip()
+    recipient_text = str(item.get("to") or "")
+    recipients = [
+        {"emailAddress": {"address": address.lower()}}
+        for address in _EMAIL_RE.findall(recipient_text)
+    ]
+    body = str(item.get("body") or "")
+    if "html" in str(item.get("content_type") or "").lower():
+        body = _visible_text(_parse_html_tree(body))
+    return {
+        "id": f"arkasm:{message_id}",
+        "subject": str(item.get("subject") or "")[:300],
+        "receivedDateTime": str(item.get("date") or ""),
+        "from": str(item.get("from") or "")[:500],
+        "bodyPreview": str(item.get("preview") or "")[:1000],
+        "body": {"content": body},
+        "toRecipients": recipients,
+    }
+
+
+def _parse_arkasm_json(text, safe_url, expected_key):
+    try:
+        payload = json.loads(str(text or ""))
+    except (TypeError, ValueError) as exc:
+        raise UrlHtmlMailboxError(
+            f"URL mailbox returned invalid JSON for {safe_url}"
+        ) from exc
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if payload.get("success") is not True or not isinstance(data, dict):
+        raise UrlHtmlMailboxError(
+            f"URL mailbox API rejected the request for {safe_url}"
+        )
+    value = data.get(expected_key)
+    if expected_key == "messages" and not isinstance(value, list):
+        raise UrlHtmlMailboxError(
+            f"URL mailbox API returned invalid data for {safe_url}"
+        )
+    return data
+
+
+def _fetch_arkasm_messages(mailbox, api_base, limit, proxy, http_get, safe_url):
+    normalized_limit = max(1, int(limit or 25))
+    inbox_url = f"{api_base}/inbox?{urlencode({'limit': normalized_limit, 'days': 7})}"
+    inbox_text = _request_text(
+        inbox_url,
+        safe_url,
+        proxy,
+        http_get,
+        "application/json",
+        ("application/json",),
+    )
+    inbox_data = _parse_arkasm_json(inbox_text, safe_url, "messages")
+    messages = []
+    for summary in inbox_data["messages"][:normalized_limit]:
+        if not isinstance(summary, dict):
+            continue
+        message_id = str(summary.get("id") or "").strip()
+        if not message_id:
+            continue
+        query = {"uid": message_id}
+        folder = str(summary.get("folder") or "").strip()
+        if folder:
+            query["folder"] = folder
+        detail_url = f"{api_base}/message?{urlencode(query)}"
+        detail_text = _request_text(
+            detail_url,
+            safe_url,
+            proxy,
+            http_get,
+            "application/json",
+            ("application/json",),
+        )
+        detail = _parse_arkasm_json(detail_text, safe_url, "id")
+        messages.append(_arkasm_message({**summary, **detail}))
+    return messages
+
+
+def fetch_url_html_messages(mailbox, limit=25, proxy="", http_get=requests.get):
+    url = str(getattr(mailbox, "inbox_url", "") or "").strip()
+    safe_url = redact_inbox_url(url)
+    arkasm_api = _arkasm_api_base(url)
+    if arkasm_api:
+        return _fetch_arkasm_messages(
+            mailbox,
+            arkasm_api,
+            limit,
+            proxy,
+            http_get,
+            safe_url,
+        )
+
+    html = _request_text(
+        url,
+        safe_url,
+        proxy,
+        http_get,
+        "text/html,text/plain;q=0.9",
+        ("text/html", "text/plain", "application/xhtml+xml"),
+    )
     return parse_url_html_messages(html, mailbox.email, limit=limit)

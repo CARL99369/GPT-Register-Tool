@@ -55,10 +55,14 @@ namespace SmsWorkbench
             }
         }
 
-        private async void RunBackend(string taskName, List<string> args)
+        private async void RunBackend(
+            string taskName,
+            List<string> args,
+            IReadOnlyCollection<string>? cleanupFiles = null)
         {
             if (runningBackendCancellation != null)
             {
+                CleanupBackendFiles(cleanupFiles);
                 MessageBox.Show("已有批次正在运行，请先取消或等待完成。", "运行中", MessageBoxButton.OK, MessageBoxImage.Information);
                 return;
             }
@@ -127,6 +131,23 @@ namespace SmsWorkbench
             {
                 if (ReferenceEquals(runningBackendCancellation, cancellation))
                     runningBackendCancellation = null;
+                CleanupBackendFiles(cleanupFiles);
+            }
+        }
+
+        private void CleanupBackendFiles(IEnumerable<string>? paths)
+        {
+            foreach (string path in paths ?? Array.Empty<string>())
+            {
+                try
+                {
+                    if (!string.IsNullOrWhiteSpace(path) && File.Exists(path))
+                        File.Delete(path);
+                }
+                catch (Exception exc)
+                {
+                    logger?.Warning(exc, "Failed to remove temporary backend input");
+                }
             }
         }
 
@@ -153,6 +174,7 @@ namespace SmsWorkbench
                 "--proxy", "--proxy-pool", "--checkout-proxy", "--provider-proxy", "--approve-proxy",
                 "--promotion-proxy", "--stripe-init-proxy", "--payment-method-proxy",
                 "--confirm-proxy", "--redirect-proxy", "--blik-code", "--mailbox-line",
+                "--phone-pool-file",
             };
             var output = new List<string>();
             for (int index = 0; index < (args?.Count ?? 0); index++)

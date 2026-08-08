@@ -81,7 +81,7 @@ namespace SmsWorkbench
             ShowInboxDialog(row);
         }
 
-        private void OneClickRegister_Click(object sender, RoutedEventArgs e)
+        private async void OneClickRegister_Click(object sender, RoutedEventArgs e)
         {
             if (TryCreateSelectedUnregisteredMailboxFile(out string pendingMailboxArg, out string pendingMailboxFile, out int pendingSelectedCount, out int pendingRowCount))
             {
@@ -115,14 +115,18 @@ namespace SmsWorkbench
 
             if (options.Source == "phone")
             {
+                string phoneSource = GetConfiguredPhoneSource();
+                if (phoneSource == "sms66" && !await ShowSms66OneClickDialogAsync()) return;
                 var phoneArgs = new List<string>
                 {
                     "--phone-register",
+                    "--phone-source",
+                    phoneSource,
                     "--count",
                     options.Count.ToString(),
                 };
                 AddRegistrationProxy(phoneArgs);
-                RunBackend("手机号注册 (SMSBower)", phoneArgs);
+                RunBackend("手机号注册 (" + phoneSource + ")", phoneArgs);
                 return;
             }
 
@@ -146,12 +150,14 @@ namespace SmsWorkbench
 
             if (options.Source == "remail_target")
             {
+                string phoneSource = GetConfiguredPhoneSource();
+                if (phoneSource == "sms66" && !EnsureSms66Configured()) return;
                 var targetArgs = new List<string>
                 {
                     "--target-at200", options.Count.ToString(),
                     "--buy-remail-mailbox", "--remail-service-mode", "purchase",
                     "--workers", options.Workers.ToString(),
-                    "--phone-reuse", "--phone-source", "smsbower"
+                    "--phone-reuse", "--phone-source", phoneSource
                 };
                 AddRegistrationProxy(targetArgs);
                 RunBackend("ReMail 长效邮箱注册 (" + options.Count + ")", targetArgs);
@@ -178,23 +184,63 @@ namespace SmsWorkbench
             args.Add("--no-phone-reuse");
         }
 
+        private string GetConfiguredPhoneSource()
+        {
+            var config = ReadJsonObject(Path.Combine(rootDir, "config.json"));
+            var phoneReuse = GetSection(config, "phone_reuse");
+            string source = GetString(phoneReuse, "source").Trim().ToLowerInvariant();
+            return source == "sms66" ? "sms66" : "smsbower";
+        }
+
+        private bool EnsureSms66Configured()
+        {
+            var config = ReadJsonObject(Path.Combine(rootDir, "config.json"));
+            var sms66 = GetChildSection(GetSection(config, "phone_reuse"), "sms66");
+            string apiKey = ResolveSms66ApiKey(GetString(sms66, "api_key"));
+            if (apiKey.Length > 0) return true;
+            ShowThemedInfoDialog("SMS66 未配置", "请先在设置的手机接码分类中填写 SMS66 API Key，并选择 sms66 供应商。");
+            return false;
+        }
+
         private async void OneClickSms_Click(object sender, RoutedEventArgs e)
         {
             var rows = SelectedEmailRowsOrNotify("接码");
             if (rows.Count == 0) return;
 
-            if (!await ShowSmsBowerOneClickDialogAsync())
-            {
+            string phoneSource = GetConfiguredPhoneSource();
+            if (!ShowOneClickSmsSourceDialog(phoneSource, out bool useApiPool))
                 return;
+
+            IReadOnlyList<ApiSmsPoolEntry>? apiEntries = null;
+            if (useApiPool)
+            {
+                if (!ShowApiSmsPoolImportDialog(out var importedEntries))
+                    return;
+                apiEntries = importedEntries;
+                phoneSource = "phone_pool";
+            }
+            else
+            {
+                if (phoneSource == "smsbower" && !await ShowSmsBowerOneClickDialogAsync())
+                    return;
+                if (phoneSource == "sms66" && !await ShowSms66OneClickDialogAsync())
+                    return;
             }
 
-            var args = new List<string> { "--one-click-sms", "--phone-source", "smsbower", "--workers", "1", "--refresh-timeout", "60" };
             if (!TryCreateMailboxFile(rows, out string mailboxArg, out string mailboxFile, out int mailboxCount)
                 || mailboxCount != rows.Count)
             {
                 ShowThemedInfoDialog("未选择邮箱", "一键接码需要读取邮箱验证码。请先导入并选择包含完整邮箱凭据的账号。");
                 return;
             }
+
+            string? temporaryPoolFile = null;
+            var args = new List<string> { "--one-click-sms" };
+            if (apiEntries == null)
+            {
+                args.AddRange(new[] { "--phone-source", phoneSource });
+            }
+            args.AddRange(new[] { "--workers", "1", "--refresh-timeout", "60" });
             args.AddRange(new[] { mailboxArg, mailboxFile });
             if (rows.Count > 1)
             {
@@ -208,7 +254,25 @@ namespace SmsWorkbench
                 AddSessionFileArg(args, rows[0]);
             }
             AddRegistrationProxy(args);
-            RunBackend("一键接码(" + rows.Count + ")", args);
+            if (apiEntries != null)
+            {
+                try
+                {
+                    temporaryPoolFile = ApiSmsPoolImport.WriteTemporaryFile(apiEntries);
+                    ApiSmsPoolImport.AddBackendArguments(args, temporaryPoolFile);
+                }
+                catch (Exception exc)
+                {
+                    CleanupBackendFiles(
+                        temporaryPoolFile == null ? null : new[] { temporaryPoolFile });
+                    ShowThemedInfoDialog("API 接码池创建失败", exc.Message);
+                    return;
+                }
+            }
+            RunBackend(
+                "一键接码(" + rows.Count + ")",
+                args,
+                temporaryPoolFile == null ? null : new[] { temporaryPoolFile });
         }
 
         private void OneClickScan_Click(object sender, RoutedEventArgs e)

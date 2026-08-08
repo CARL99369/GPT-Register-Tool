@@ -56,6 +56,28 @@ class EmailOtpFilteringTests(unittest.TestCase):
 
         self.assertEqual(login_candidate["otp"], "123456")
 
+    def test_login_keyword_accepts_localized_japanese_code_subject(self):
+        mailbox = MailboxAccount(email="target@hotmail.com", provider="chatai")
+        candidate = _email_otp_candidate(
+            mailbox,
+            self._message("あなたの臨時 ChatGPT ログインコード"),
+            keyword=LOGIN_EMAIL_OTP_SUBJECT_KEYWORD,
+            issued_after_unix=0,
+        )
+
+        self.assertEqual(candidate["otp"], "123456")
+
+    def test_login_keyword_accepts_localized_chinese_login_code_subject(self):
+        mailbox = MailboxAccount(email="target@hotmail.com", provider="chatai")
+        candidate = _email_otp_candidate(
+            mailbox,
+            self._message("你的临时 ChatGPT 登录代码"),
+            keyword=LOGIN_EMAIL_OTP_SUBJECT_KEYWORD,
+            issued_after_unix=0,
+        )
+
+        self.assertEqual(candidate["otp"], "123456")
+
     def test_cfworker_registration_otp_issued_after_has_small_grace(self):
         mailbox = MailboxAccount(email="target@edu.liziai.cloud", provider="cfworker")
         adjusted = _provider_otp_issued_after(mailbox, 1779934004)

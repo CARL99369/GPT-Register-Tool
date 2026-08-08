@@ -380,7 +380,7 @@ namespace SmsWorkbench
             try
             {
                 EnsureAccountExtraColumns(dbPath);
-                string sql = "SELECT id,email,access_token,status,error,paypal_ok,payment_method,paypal_url,paypal_status,refresh_token_status,batch_id,registration_state,registration_country,json_path,raw_json,pipeline_total_seconds,timing_total_seconds,created_at,updated_at FROM accounts ORDER BY updated_at DESC";
+                string sql = "SELECT id,email,access_token,status,error,paypal_ok,payment_method,paypal_url,paypal_status,refresh_token_status,oauth_refresh_token,batch_id,registration_state,registration_country,json_path,raw_json,pipeline_total_seconds,timing_total_seconds,created_at,updated_at FROM accounts ORDER BY updated_at DESC";
                 var rows = SqliteNative.Query(dbPath, sql);
                 if (rows.Count == 0) return false;
                 foreach (Dictionary<string, string> data in rows)
@@ -391,7 +391,8 @@ namespace SmsWorkbench
                     string paymentMethod = data.TryGetValue("payment_method", out string rawPaymentMethod) ? rawPaymentMethod : "";
                     string paypalUrl = data.TryGetValue("paypal_url", out string rawPaypalUrl) ? rawPaypalUrl : "";
                     string paypalStatus = data.TryGetValue("paypal_status", out string rawPaypalStatus) ? rawPaypalStatus : "";
-                    string refreshTokenStatus = data.TryGetValue("refresh_token_status", out string rawRefreshTokenStatus) ? rawRefreshTokenStatus : "";
+                    string storedRefreshTokenStatus = data.TryGetValue("refresh_token_status", out string rawRefreshTokenStatus) ? rawRefreshTokenStatus : "";
+                    string storedOAuthRefreshToken = data.TryGetValue("oauth_refresh_token", out string rawOAuthRefreshToken) ? rawOAuthRefreshToken : "";
                     string access = data.TryGetValue("access_token", out string rawAccess) ? rawAccess : "";
                     string jsonPath = data.TryGetValue("json_path", out string rawJsonPath) ? rawJsonPath : "";
                     string rawJson = data.TryGetValue("raw_json", out string rawRawJson) ? rawRawJson : "";
@@ -405,6 +406,11 @@ namespace SmsWorkbench
                     {
                         if (!rawData.ContainsKey(kv.Key)) rawData[kv.Key] = kv.Value;
                     }
+                    string refreshTokenStatus = RefreshTokenState.Resolve(
+                        storedRefreshTokenStatus,
+                        storedOAuthRefreshToken,
+                        GetString(rawData, "oauth_refresh_token"),
+                        GetString(rawData, "refresh_token"));
                     string paypalAmount = GetPaypalAmount(rawJson);
                     string importedStatus = GetImportedStatus(rawJson);
                     string verifiedPhone = GetVerifiedPhone(rawJson);
@@ -482,7 +488,10 @@ namespace SmsWorkbench
                         string paypalStatus = GetPaypalStatus(data);
                         string paypalUrl = GetPaypalUrl(data);
                         string paypalAmount = GetPaypalAmount(data);
-                        string refreshTokenStatus = GetString(data, "refresh_token_status");
+                        string refreshTokenStatus = RefreshTokenState.Resolve(
+                            GetString(data, "refresh_token_status"),
+                            GetString(data, "oauth_refresh_token"),
+                            GetString(data, "refresh_token"));
                         string importedStatus = GetImportedStatus(data);
                         string verifiedPhone = GetVerifiedPhone(data);
                         TryReadMailboxFromRawJson(JsonSerializer.Serialize(data), out string mailboxProvider, out string mailboxClientId, out string mailboxRefreshToken, out string mailboxToken, out string mailboxLine);
