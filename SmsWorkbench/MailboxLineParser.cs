@@ -68,6 +68,28 @@ namespace SmsWorkbench
                 return true;
             }
 
+            if (value.Contains("----"))
+            {
+                string[] accountParts = value.Split(QuadDelimiter, StringSplitOptions.None);
+                bool accountMfaLine = accountParts.Length == 3
+                    && LooksLikeEmail(accountParts[0].Trim())
+                    && accountParts[1].Trim().Length > 0
+                    && LooksLikeTotpSecret(accountParts[2].Trim());
+                if (!accountMfaLine && accountParts.Length == 4)
+                {
+                    accountMfaLine = LooksLikeEmail(accountParts[0].Trim())
+                        && accountParts[1].Trim().Length > 0
+                        && LooksLikeTotpSecret(accountParts[2].Trim())
+                        && LooksLikeTotpSecret(accountParts[3].Trim())
+                        && NormalizeTotpCandidate(accountParts[2]) == NormalizeTotpCandidate(accountParts[3]);
+                }
+                if (accountMfaLine)
+                {
+                    info = new MailboxLineInfo(accountParts[0].Trim(), "account_mfa", "--chatai-mailbox-file", value);
+                    return true;
+                }
+            }
+
             if (value.Contains("----")
                 && value.Split(QuadDelimiter, StringSplitOptions.None).Length >= 4)
             {
@@ -94,6 +116,18 @@ namespace SmsWorkbench
                 && at < value.Length - 3
                 && value.IndexOf('.', at) > at + 1
                 && !value.Any(char.IsWhiteSpace);
+        }
+
+        private static bool LooksLikeTotpSecret(string value)
+        {
+            string compact = NormalizeTotpCandidate(value);
+            return compact.Length >= 8
+                && compact.All(ch => (ch >= 'A' && ch <= 'Z') || (ch >= '2' && ch <= '7'));
+        }
+
+        private static string NormalizeTotpCandidate(string value)
+        {
+            return new string((value ?? "").Where(char.IsLetterOrDigit).ToArray()).ToUpperInvariant();
         }
     }
 }

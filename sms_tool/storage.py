@@ -143,6 +143,19 @@ def _ensure_extra_columns(conn):
         SET refresh_token_status='no_rt'
         WHERE refresh_token_status IS NULL OR refresh_token_status=''
     """)
+    conn.execute("""
+        UPDATE accounts
+        SET status='account_deactivated'
+        WHERE lower(COALESCE(status, '')) NOT IN ('account_deactivated', 'account_deatived')
+          AND (
+            lower(COALESCE(error, '')) LIKE '%account_deactivated%'
+            OR lower(COALESCE(error, '')) LIKE '%account_deatived%'
+            OR lower(COALESCE(error, '')) LIKE '%deleted or deactivated%'
+            OR lower(COALESCE(raw_json, '')) LIKE '%account_deactivated%'
+            OR lower(COALESCE(raw_json, '')) LIKE '%account_deatived%'
+            OR lower(COALESCE(raw_json, '')) LIKE '%deleted or deactivated%'
+          )
+    """)
 
 
 # ── Data Normalization Helpers ───────────────────────────────────────────────
@@ -373,12 +386,16 @@ def _looks_at_invalid(data, paypal):
 
 
 def _looks_account_deactivated(data, paypal):
+    password_attempt = _nested(data, "password_attempt")
     text = " ".join(
         str(value or "")
         for value in (
             _get(data, "error"),
             _get(data, "status"),
             _get(data, "account_scan_status"),
+            _get(password_attempt, "error"),
+            _get(password_attempt, "body"),
+            _get(password_attempt, "message"),
             _get(paypal, "error"),
         )
     ).lower()

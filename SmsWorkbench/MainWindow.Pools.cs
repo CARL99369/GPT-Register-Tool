@@ -316,6 +316,27 @@ namespace SmsWorkbench
                     continue;
                 }
 
+                if (MailboxLineParser.TryParse(line, out parsed)
+                    && parsed.Provider == "account_mfa")
+                {
+                    allRows.Add(new PoolRow
+                    {
+                        Id = "M" + (i + 1),
+                        CreatedAt = SafeTime(File.GetLastWriteTime(path)),
+                        CompletedAt = SafeTime(File.GetLastWriteTime(path)),
+                        Identifier = parsed.Email,
+                        AccountType = "ChatGPT MFA",
+                        Status = "Password+TOTP",
+                        RefreshToken = "TOTP",
+                        Notes = path,
+                        SourcePath = path,
+                        RawLine = line,
+                        MailboxLine = line,
+                        MailboxProvider = "account_mfa"
+                    });
+                    continue;
+                }
+
                 if (line.Contains("----"))
                 {
                     string[] parts = line.Split(new[] { "----" }, 4, StringSplitOptions.None);

@@ -1953,12 +1953,17 @@ def _one_click_sms(args):
     if explicit_entries is not None:
         pool_options["explicit_entries"] = explicit_entries
     phone_pool = create_phone_pool(**pool_options)
-    if not phone_pool.phones:
+    account_mfa_only = bool(emails) and all(
+        str(explicit_mailboxes.get(email.strip().lower()).provider if explicit_mailboxes.get(email.strip().lower()) else "").strip().lower() == "account_mfa"
+        for email in emails
+    )
+    if not phone_pool.phones and not account_mfa_only:
         print("[Error] --one-click-sms requires a phone pool. Configure phone_reuse.smsbower.api_key/SMSBOWER_API_KEY or phone_reuse.phone_pool.")
         raise SystemExit(2)
-    phone_pool.reset_exhausted_smsbower_slots()
+    if phone_pool.phones:
+        phone_pool.reset_exhausted_smsbower_slots()
     print_phone_pool_status(phone_pool)
-    if phone_pool.total_capacity <= 0:
+    if phone_pool.total_capacity <= 0 and not account_mfa_only:
         print("[Error] --one-click-sms requires at least one available phone slot; current phone pool is exhausted.")
         raise SystemExit(2)
 
@@ -1975,12 +1980,18 @@ def _one_click_sms(args):
         mailbox = explicit_mailboxes.get(email.strip().lower())
         if mailbox is not None:
             data["mailbox"] = _mailbox_snapshot(mailbox)
+        account_mfa = data.get("mailbox") if isinstance(data.get("mailbox"), dict) else {}
+        use_account_mfa = (
+            str(account_mfa.get("provider") or "").strip().lower() == "account_mfa"
+            and bool(str(account_mfa.get("password") or "").strip())
+            and bool(str(account_mfa.get("totp_secret") or "").strip())
+        )
         result = refresh_codex_oauth_session(
             data,
             json_path=json_path,
             proxy=args.proxy,
             timeout=args.refresh_timeout,
-            force_email_otp_login=True,
+            force_email_otp_login=not use_account_mfa,
             phone_pool=phone_pool,
         )
         if result.get("ok"):

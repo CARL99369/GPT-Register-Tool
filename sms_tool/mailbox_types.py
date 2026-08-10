@@ -6,6 +6,7 @@ class MailboxAccount:
     email: str
     password: str = ""
     login_password: str = ""
+    totp_secret: str = ""
     refresh_token: str = ""
     access_token: str = ""
     source: str = ""

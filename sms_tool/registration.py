@@ -71,6 +71,7 @@ def _mailbox_snapshot(mailbox):
         "email": getattr(mailbox, "email", ""),
         "password": getattr(mailbox, "password", ""),
         "login_password": getattr(mailbox, "login_password", ""),
+        "totp_secret": getattr(mailbox, "totp_secret", ""),
         "refresh_token": getattr(mailbox, "refresh_token", ""),
         "access_token": getattr(mailbox, "access_token", ""),
         "source": getattr(mailbox, "source", ""),

@@ -2,9 +2,10 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass, field
+from html import unescape
 from datetime import datetime
 from html.parser import HTMLParser
-from urllib.parse import quote, urlencode, urlsplit
+from urllib.parse import parse_qs, quote, urlencode, urlsplit
 
 import requests
 
@@ -37,7 +38,11 @@ _DATE_RE = re.compile(
     r"(?:\s*(Z|[+-]\d{2}:?\d{2}))?"
 )
 MAX_HTML_BYTES = 2 * 1024 * 1024
+MAX_SRCDOC_DEPTH = 3
 _ARKASM_HOST = "icloud.arkasm.cn"
+_FLYSMS_HOST = "flysms.xyz"
+_FLYSMS_PICKUP_PATH = "/icloud/pickup"
+_FLYSMS_TOKEN_RE = re.compile(r"^tok_[A-Za-z0-9_-]+$")
 
 
 class UrlHtmlMailboxError(RuntimeError):
@@ -116,15 +121,24 @@ def _walk(node):
         yield from _walk(child)
 
 
-def _text_parts(node, output):
+def _text_parts(node, output, srcdoc_depth=0):
     if node.tag in _HIDDEN_TAGS:
         return
+
+    srcdoc = str(node.attrs.get("srcdoc") or "")
+    if node.tag == "iframe" and srcdoc and srcdoc_depth < MAX_SRCDOC_DEPTH:
+        output.append("\n")
+        embedded_root = _parse_html_tree(unescape(srcdoc))
+        _text_parts(embedded_root, output, srcdoc_depth + 1)
+        output.append("\n")
+        return
+
     is_block = node.tag in _BLOCK_TAGS
     if is_block:
         output.append("\n")
     for child in node.children:
         if isinstance(child, _Node):
-            _text_parts(child, output)
+            _text_parts(child, output, srcdoc_depth)
         else:
             output.append(child)
     if is_block:
@@ -276,6 +290,17 @@ def _fallback_context_messages(text, mailbox_email):
     return messages
 
 
+def _plus_alias_base(value):
+    email = str(value or "").strip().lower()
+    if "@" not in email:
+        return ""
+    local, domain = email.rsplit("@", 1)
+    local = local.split("+", 1)[0]
+    if not local or not domain:
+        return ""
+    return f"{local}@{domain}"
+
+
 def parse_url_html_messages(html, mailbox_email, limit=25):
     root = _parse_html_tree(str(html or ""))
     messages = []
@@ -298,12 +323,79 @@ def parse_url_html_messages(html, mailbox_email, limit=25):
     return unique
 
 
-def _request_text(url, safe_url, proxy, http_get, accept, content_types):
+def _parse_generic_url_payload(text, mailbox_email, safe_url, limit=25):
+    try:
+        payload = json.loads(str(text or ""))
+    except (TypeError, ValueError):
+        return parse_url_html_messages(text, mailbox_email, limit=limit)
+
+    if isinstance(payload, dict):
+        status_code = str(payload.get("code") or "").strip().lower()
+        if payload.get("success") is True and re.fullmatch(r"\d{6}", status_code):
+            subject = str(payload.get("subject") or "").strip()[:300]
+            message_text = str(payload.get("message") or "").strip()
+            body = "\n".join(
+                value
+                for value in (
+                    subject,
+                    message_text,
+                    f"ChatGPT verification code: {status_code}",
+                )
+                if value
+            )
+            message = _message_from_text(body, mailbox_email)
+            if message:
+                if subject:
+                    message["subject"] = subject
+                received_at = str(
+                    payload.get("received_at")
+                    or payload.get("receivedDateTime")
+                    or ""
+                ).strip()
+                if received_at:
+                    message["receivedDateTime"] = received_at
+                message_id = str(
+                    payload.get("message_id") or payload.get("id") or ""
+                ).strip()
+                if message_id:
+                    message["id"] = f"url-json:{message_id}"
+                recipient = str(payload.get("email") or mailbox_email or "").strip()
+                mailbox_recipient = str(mailbox_email or "").strip()
+                if (
+                    recipient
+                    and mailbox_recipient
+                    and _plus_alias_base(recipient) == _plus_alias_base(mailbox_recipient)
+                ):
+                    recipient = mailbox_recipient
+                if recipient:
+                    message["toRecipients"] = [
+                        {"emailAddress": {"address": recipient.lower()}}
+                    ]
+            return [message] if message else []
+        if payload.get("retryable") is True or status_code == "no_code":
+            return []
+    raise UrlHtmlMailboxError(
+        f"URL mailbox returned unsupported JSON for {safe_url}"
+    )
+
+
+def _request_text(
+    url,
+    safe_url,
+    proxy,
+    http_get,
+    accept,
+    content_types,
+    request_headers=None,
+):
     proxies = {"http": proxy, "https": proxy} if proxy else None
+    headers = {"Accept": accept}
+    if request_headers:
+        headers.update(request_headers)
     try:
         response = http_get(
             url,
-            headers={"Accept": accept},
+            headers=headers,
             proxies=proxies,
             timeout=(10, 20),
             stream=True,
@@ -369,6 +461,120 @@ def _arkasm_api_base(url):
         f"{parsed.scheme.lower()}://{parsed.netloc}/api/public/share/"
         f"{quote(token, safe='')}"
     )
+
+
+def _flysms_credentials(url, mailbox_email, safe_url):
+    try:
+        parsed = urlsplit(str(url or ""))
+    except ValueError:
+        return None
+    if (
+        (parsed.hostname or "").lower() != _FLYSMS_HOST
+        or (parsed.path or "").rstrip("/") != _FLYSMS_PICKUP_PATH
+    ):
+        return None
+
+    fragment = parse_qs(parsed.fragment, keep_blank_values=True)
+    emails = fragment.get("email", [])
+    keys = fragment.get("key", [])
+    if len(emails) != 1 or len(keys) != 1:
+        raise UrlHtmlMailboxError(
+            f"FlySMS pickup URL has invalid credentials for {safe_url}"
+        )
+    email = str(emails[0] or "").strip().lower()
+    expected_email = str(mailbox_email or "").strip().lower()
+    token = str(keys[0] or "").strip()
+    if (
+        not email
+        or email != expected_email
+        or not token
+        or len(token) > 512
+        or not _FLYSMS_TOKEN_RE.fullmatch(token)
+    ):
+        raise UrlHtmlMailboxError(
+            f"FlySMS pickup URL has invalid credentials for {safe_url}"
+        )
+    return parsed, email, token
+
+
+def _flysms_message(record):
+    item = record if isinstance(record, dict) else {}
+    mailbox_name = str(item.get("mailbox") or "INBOX").strip() or "INBOX"
+    uid = str(item.get("uid") or "").strip()
+    if not uid:
+        return None
+    recipient_text = str(item.get("to") or "")
+    recipients = [
+        {"emailAddress": {"address": address.lower()}}
+        for address in _EMAIL_RE.findall(recipient_text)
+    ]
+    body = str(item.get("text") or item.get("preview") or "")
+    if not body and item.get("html"):
+        body = _visible_text(_parse_html_tree(str(item.get("html") or "")))
+    return {
+        "id": f"flysms:{mailbox_name}:{uid}",
+        "subject": str(item.get("subject") or "")[:300],
+        "receivedDateTime": str(item.get("date") or ""),
+        "from": str(item.get("from") or "")[:500],
+        "bodyPreview": str(item.get("preview") or body)[:1000],
+        "body": {"content": body},
+        "toRecipients": recipients,
+    }
+
+
+def _parse_flysms_json(text, mailbox_email, safe_url, limit):
+    try:
+        payload = json.loads(str(text or ""))
+    except (TypeError, ValueError) as exc:
+        raise UrlHtmlMailboxError(
+            f"FlySMS returned invalid JSON for {safe_url}"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise UrlHtmlMailboxError(
+            f"FlySMS returned invalid data for {safe_url}"
+        )
+    response_email = str(payload.get("email") or "").strip().lower()
+    expected_email = str(mailbox_email or "").strip().lower()
+    records = payload.get("messages")
+    if response_email != expected_email or not isinstance(records, list):
+        raise UrlHtmlMailboxError(
+            f"FlySMS returned invalid data for {safe_url}"
+        )
+    messages = []
+    for record in records[:max(1, int(limit or 25))]:
+        message = _flysms_message(record)
+        if message:
+            messages.append(message)
+    return messages
+
+
+def _fetch_flysms_messages(
+    mailbox,
+    credentials,
+    limit,
+    proxy,
+    http_get,
+    safe_url,
+):
+    parsed, email, token = credentials
+    normalized_limit = max(1, min(int(limit or 25), 100))
+    api_url = (
+        f"{parsed.scheme.lower()}://{parsed.netloc}"
+        f"/icloud/api/pickup/messages?{urlencode({'limit': normalized_limit})}"
+    )
+    text = _request_text(
+        api_url,
+        safe_url,
+        proxy,
+        http_get,
+        "application/json",
+        ("application/json",),
+        request_headers={
+            "Authorization": f"Bearer {token}",
+            "X-Mailbox-Email": email,
+        },
+    )
+    return _parse_flysms_json(text, mailbox.email, safe_url, normalized_limit)
 
 
 def _arkasm_message(record):
@@ -453,6 +659,16 @@ def _fetch_arkasm_messages(mailbox, api_base, limit, proxy, http_get, safe_url):
 def fetch_url_html_messages(mailbox, limit=25, proxy="", http_get=requests.get):
     url = str(getattr(mailbox, "inbox_url", "") or "").strip()
     safe_url = redact_inbox_url(url)
+    flysms_credentials = _flysms_credentials(url, mailbox.email, safe_url)
+    if flysms_credentials:
+        return _fetch_flysms_messages(
+            mailbox,
+            flysms_credentials,
+            limit,
+            proxy,
+            http_get,
+            safe_url,
+        )
     arkasm_api = _arkasm_api_base(url)
     if arkasm_api:
         return _fetch_arkasm_messages(
@@ -469,7 +685,12 @@ def fetch_url_html_messages(mailbox, limit=25, proxy="", http_get=requests.get):
         safe_url,
         proxy,
         http_get,
-        "text/html,text/plain;q=0.9",
-        ("text/html", "text/plain", "application/xhtml+xml"),
+        "text/html,text/plain;q=0.9,application/json;q=0.9",
+        ("text/html", "text/plain", "application/xhtml+xml", "application/json"),
     )
-    return parse_url_html_messages(html, mailbox.email, limit=limit)
+    return _parse_generic_url_payload(
+        html,
+        mailbox.email,
+        safe_url,
+        limit=limit,
+    )

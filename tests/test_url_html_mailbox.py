@@ -69,6 +69,36 @@ def test_mailbox_file_loader_prioritizes_url_html_over_chongzhi_separator(tmp_pa
     assert mailbox_module.mailbox_has_inbox_credentials(records[0])
 
 
+def test_parse_password_totp_account_line(tmp_path):
+    source = tmp_path / "accounts.txt"
+    source.write_text(
+        "user@example.com----account-password----JBSWY3DPEHPK3PXP---\n",
+        encoding="utf-8",
+    )
+
+    records = _parse_chatai_mailbox_file(source)
+
+    assert len(records) == 1
+    assert records[0].provider == "account_mfa"
+    assert records[0].email == "user@example.com"
+    assert records[0].password == "account-password"
+    assert records[0].totp_secret == "JBSWY3DPEHPK3PXP"
+
+
+def test_parse_password_totp_account_line_with_duplicate_secret(tmp_path):
+    source = tmp_path / "accounts.txt"
+    source.write_text(
+        "user@example.com----account-password----JBSWY3DPEHPK3PXP----JBSWY3DPEHPK3PXP\n",
+        encoding="utf-8",
+    )
+
+    records = _parse_chatai_mailbox_file(source)
+
+    assert len(records) == 1
+    assert records[0].provider == "account_mfa"
+    assert records[0].totp_secret == "JBSWY3DPEHPK3PXP"
+
+
 def test_parses_details_mail_card():
     html = """
     <article class="mail-card"><details open>
@@ -148,6 +178,25 @@ def test_visible_text_fallback_builds_code_context_candidate():
     messages = parse_url_html_messages(html, mailbox.email)
 
     assert any(_otp(mailbox, message) == "864209" for message in messages)
+
+
+def test_parses_otp_from_iframe_srcdoc_mail_body():
+    html = """
+    <article class="mail">
+      <div class="mail-head">
+        <h2 class="subject">Your temporary ChatGPT login code</h2>
+        <div class="meta">From: noreply@tm.openai.com</div>
+      </div>
+      <iframe class="body-frame" srcdoc="&lt;html&gt;&lt;body&gt;
+        &lt;p&gt;Enter this temporary verification code to continue: 519317&lt;/p&gt;
+      &lt;/body&gt;&lt;/html&gt;"></iframe>
+    </article>
+    """
+    mailbox = MailboxAccount(email="user@icloud.com", provider="url_html")
+
+    messages = parse_url_html_messages(html, mailbox.email)
+
+    assert any(_otp(mailbox, message) == "519317" for message in messages)
 
 
 class FakeResponse:
@@ -250,6 +299,65 @@ def test_fetches_arkasm_share_mailbox_through_public_api():
     assert _otp(mailbox, messages[0]) == "482731"
 
 
+def test_fetches_flysms_pickup_mailbox_through_json_api():
+    pickup_url = (
+        "https://flysms.xyz/icloud/pickup"
+        "#email=user%40icloud.com&key=tok_test_pickup_key"
+    )
+    messages_api = "https://flysms.xyz/icloud/api/pickup/messages?limit=25"
+    calls = []
+
+    def fake_get(url, **kwargs):
+        calls.append((url, kwargs))
+        response = FakeResponse()
+        response.headers = {"Content-Type": "application/json; charset=utf-8"}
+        response.payload = json.dumps({
+            "email": "user@icloud.com",
+            "scope": "test-scope",
+            "revision": "test-revision",
+            "messages": [{
+                "mailbox": "INBOX",
+                "uid": 4295180644,
+                "subject": "Your temporary ChatGPT verification code",
+                "from": "ChatGPT <noreply@tm.openai.com>",
+                "to": "user@icloud.com",
+                "date": "2026-08-10T11:50:58.000Z",
+                "preview": "Enter this temporary verification code: 413721",
+                "hasAttachments": False,
+            }],
+            "nextCursor": None,
+        }).encode("utf-8")
+        return response
+
+    mailbox = MailboxAccount(
+        email="user@icloud.com",
+        provider="url_html",
+        inbox_url=pickup_url,
+    )
+
+    messages = mailbox_url_html.fetch_url_html_messages(
+        mailbox,
+        proxy="http://127.0.0.1:7897",
+        http_get=fake_get,
+    )
+
+    assert [url for url, _ in calls] == [messages_api]
+    assert calls[0][1]["headers"] == {
+        "Accept": "application/json",
+        "Authorization": "Bearer tok_test_pickup_key",
+        "X-Mailbox-Email": "user@icloud.com",
+    }
+    assert calls[0][1]["proxies"] == {
+        "http": "http://127.0.0.1:7897",
+        "https": "http://127.0.0.1:7897",
+    }
+    assert messages[0]["id"] == "flysms:INBOX:4295180644"
+    assert messages[0]["toRecipients"] == [
+        {"emailAddress": {"address": "user@icloud.com"}}
+    ]
+    assert _otp(mailbox, messages[0]) == "413721"
+
+
 def test_fetch_honors_proxy_follows_redirects_and_returns_messages():
     calls = []
 
@@ -276,6 +384,118 @@ def test_fetch_honors_proxy_follows_redirects_and_returns_messages():
     assert calls[0][1]["allow_redirects"] is True
     assert messages
     assert mailbox_url_html.redact_inbox_url(mailbox.inbox_url) == "https://example.test/<redacted>"
+
+
+def test_fetch_generic_json_no_code_returns_empty_mailbox():
+    response = FakeResponse()
+    response.headers = {"Content-Type": "application/json; charset=utf-8"}
+    response.payload = json.dumps({
+        "success": False,
+        "code": "no_code",
+        "message": "No verification code received yet",
+        "retryable": True,
+    }).encode("utf-8")
+    mailbox = MailboxAccount(
+        email="user@icloud.com",
+        provider="url_html",
+        inbox_url="https://mail.example.test/share/private-token",
+    )
+
+    messages = mailbox_url_html.fetch_url_html_messages(
+        mailbox,
+        http_get=lambda *args, **kwargs: response,
+    )
+
+    assert messages == []
+    assert response.closed
+
+
+def test_fetch_generic_json_extracts_direct_verification_code():
+    response = FakeResponse()
+    response.headers = {"Content-Type": "application/json; charset=utf-8"}
+    response.payload = json.dumps({
+        "success": True,
+        "code": "482731",
+        "message": "Verification code received",
+        "retryable": False,
+    }).encode("utf-8")
+    mailbox = MailboxAccount(
+        email="user@icloud.com",
+        provider="url_html",
+        inbox_url="https://mail.example.test/share/private-token",
+    )
+
+    messages = mailbox_url_html.fetch_url_html_messages(
+        mailbox,
+        http_get=lambda *args, **kwargs: response,
+    )
+
+    assert len(messages) == 1
+    assert _otp(mailbox, messages[0]) == "482731"
+
+
+def test_fetch_generic_json_preserves_subject_for_login_code_filter():
+    response = FakeResponse()
+    response.headers = {"Content-Type": "application/json; charset=utf-8"}
+    response.payload = json.dumps({
+        "success": True,
+        "code": "482731",
+        "email": "user@icloud.com",
+        "message_id": "msg_004469",
+        "received_at": "2026-08-10T05:38:53Z",
+        "subject": "Your temporary ChatGPT login code",
+    }).encode("utf-8")
+    mailbox = MailboxAccount(
+        email="user@icloud.com",
+        provider="url_html",
+        inbox_url="https://mail.example.test/share/private-token",
+    )
+
+    messages = mailbox_url_html.fetch_url_html_messages(
+        mailbox,
+        http_get=lambda *args, **kwargs: response,
+    )
+    candidate = _email_otp_candidate(
+        mailbox,
+        messages[0],
+        keyword="login code|登录代码",
+        issued_after_unix=1786340134,
+    )
+
+    assert candidate is not None
+    assert candidate["otp"] == "482731"
+
+
+def test_fetch_generic_json_accepts_canonicalized_plus_alias_recipient():
+    response = FakeResponse()
+    response.headers = {"Content-Type": "application/json; charset=utf-8"}
+    response.payload = json.dumps({
+        "success": True,
+        "code": "482731",
+        "email": "user@icloud.com",
+        "message_id": "msg_004469",
+        "received_at": "2026-08-10T05:38:53Z",
+        "subject": "Your temporary ChatGPT login code",
+    }).encode("utf-8")
+    mailbox = MailboxAccount(
+        email="user+kfc@icloud.com",
+        provider="url_html",
+        inbox_url="https://mail.example.test/share/private-token",
+    )
+
+    messages = mailbox_url_html.fetch_url_html_messages(
+        mailbox,
+        http_get=lambda *args, **kwargs: response,
+    )
+    candidate = _email_otp_candidate(
+        mailbox,
+        messages[0],
+        keyword="login code|登录代码",
+        issued_after_unix=1786340134,
+    )
+
+    assert candidate is not None
+    assert candidate["otp"] == "482731"
 
 
 def test_fetch_rejects_non_html_and_oversized_response_without_leaking_url():

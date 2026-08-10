@@ -52,7 +52,9 @@ namespace SmsWorkbench
                     && line.Split(new[] { "----" }, StringSplitOptions.None).Length >= 4;
                 bool urlHtml = MailboxLineParser.TryParse(line, out MailboxLineInfo parsed)
                     && parsed.Provider == "url_html";
-                if (!existingFourPart && !urlHtml) { skipped++; continue; }
+                bool accountMfa = MailboxLineParser.TryParse(line, out parsed)
+                    && parsed.Provider == "account_mfa";
+                if (!existingFourPart && !urlHtml && !accountMfa) { skipped++; continue; }
                 if (existingLines.Contains(line)) { skipped++; continue; }
                 newLines.Add(line);
                 imported++;

@@ -3,6 +3,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from .mailbox_types import MailboxAccount
+from .totp import normalize_totp_secret
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 URL_HTML_SEPARATOR_RE = re.compile(r"-{4,}(?=https?://)", re.IGNORECASE)
@@ -321,6 +322,34 @@ def _parse_chatai_mailbox_file(path):
             if account:
                 records.append(account)
             continue
+        if "----" in line:
+            parts = line.split("----")
+            if len(parts) in {3, 4}:
+                email = _normalize_mailbox_email(parts[0].strip())
+                password = parts[1].strip()
+                raw_secret = parts[2].strip()
+                try:
+                    totp_secret = normalize_totp_secret(raw_secret)
+                except ValueError:
+                    totp_secret = ""
+                duplicate_secret_matches = True
+                if len(parts) == 4:
+                    try:
+                        duplicate_secret_matches = (
+                            normalize_totp_secret(parts[3].strip()) == totp_secret
+                        )
+                    except ValueError:
+                        duplicate_secret_matches = False
+                if email and password and totp_secret and duplicate_secret_matches:
+                    records.append(MailboxAccount(
+                        email=email.lower(),
+                        password=password,
+                        totp_secret=totp_secret,
+                        source=str(chatai_path),
+                        provider="account_mfa",
+                        auth_mode="password_totp",
+                    ))
+                    continue
         if "----" in line:
             account = _parse_url_html_line(line, chatai_path, line_no)
             if account:

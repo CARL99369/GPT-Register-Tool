@@ -191,9 +191,10 @@ public sealed class DesktopWindowSmokeTests
     private static void VerifyMainWindowRegistrationAndContextMenu(string rootDirectory)
     {
         using var logger = new Serilog.LoggerConfiguration().CreateLogger();
+        var backend = new StubBackendClient();
         var main = new MainWindow(
             new TestApplicationPaths(rootDirectory),
-            new StubBackendClient(),
+            backend,
             new WindowPaymentBatchDialogService(),
             new StubStandaloneServiceController(),
             new StubFileLauncher(),
@@ -343,6 +344,31 @@ public sealed class DesktopWindowSmokeTests
             Assert.Null(captureFailure);
             Assert.Equal(0, selectedComboBoxCount);
             Assert.Equal(0, selectedCheckBoxCount);
+
+            bool phoneSourceDialogShown = false;
+            main.SelectedRow = new PoolRow
+            {
+                Identifier = "mfa@example.com",
+                MailboxProvider = "account_mfa",
+                RawLine = "mfa@example.com----password----JBSWY3DPEHPK3PXP"
+            };
+            Dispatcher.CurrentDispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, new Action(() =>
+            {
+                Window? dialog = Application.Current.Windows
+                    .Cast<Window>()
+                    .FirstOrDefault(window => ReferenceEquals(window.Owner, main));
+                phoneSourceDialogShown = dialog != null;
+                dialog?.Close();
+            }));
+
+            method = typeof(MainWindow).GetMethod(
+                "OneClickSms_Click",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+            Assert.NotNull(method);
+            method.Invoke(main, new object[] { main, new RoutedEventArgs() });
+            FlushDispatcher();
+            Assert.True(phoneSourceDialogShown);
+            Assert.Null(backend.LastCommand);
         }
         finally
         {

@@ -7,6 +7,61 @@ from sms_tool import storage
 
 
 class StorageDedupTests(unittest.TestCase):
+    def test_database_upgrade_marks_nested_deactivation_as_terminal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "accounts.sqlite3"
+            storage.init_database(db_path)
+            conn = storage._connect(db_path)
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO accounts (
+                        email,success,status,error,created_at,updated_at,raw_json
+                    ) VALUES (?,?,?,?,?,?,?)
+                    """,
+                    (
+                        "nested-dead@example.com",
+                        0,
+                        "failed",
+                        "passwordless_missing_mailbox",
+                        1,
+                        1,
+                        '{"password_attempt":{"body":"account deleted or deactivated","error":"account_deactivated"}}',
+                    ),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            storage.init_database(db_path)
+            conn = storage._connect(db_path)
+            try:
+                row = conn.execute(
+                    "SELECT status FROM accounts WHERE email=?",
+                    ("nested-dead@example.com",),
+                ).fetchone()
+            finally:
+                conn.close()
+
+        self.assertEqual(row["status"], "account_deactivated")
+
+    def test_nested_deactivation_response_overrides_passwordless_fallback(self):
+        status = storage._status(
+            {
+                "success": False,
+                "error": "passwordless_missing_mailbox",
+                "password_attempt": {
+                    "error": "password_verify_failed:403",
+                    "body": '{"error":{"code":"account_deactivated","message":"account deleted or deactivated"}}',
+                },
+            },
+            {},
+            "",
+            has_refresh_token=False,
+        )
+
+        self.assertEqual(status, "account_deactivated")
+
     def test_registration_failure_is_audited_without_entering_accounts(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "accounts.sqlite3"

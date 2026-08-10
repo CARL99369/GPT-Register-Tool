@@ -17,6 +17,7 @@ from .http_client import request_with_retry
 from .mailbox import MailboxAccount, MailboxTokenExpiredError, _poll_email_otp, mailbox_has_inbox_credentials
 from . import mailbox_gmail
 from .storage import upsert_account
+from .totp import generate_totp
 
 
 AUTH_URL = "https://auth.openai.com/oauth/authorize"
@@ -247,11 +248,15 @@ def _run_protocol_login_stages(
     initial_otp_requested=False,
     otp_issued_after_unix=None,
 ):
-    allow_takeover = bool(force_email_otp_login or _allow_passwordless_takeover())
     stage = _detect_protocol_stage(current_url)
     data.setdefault("codex_oauth_protocol", {})
     data["codex_oauth_protocol"]["stage"] = stage
     print(f"[*] Codex OAuth protocol stage: {stage}")
+    account_mfa_configured = bool(_account_password_from_data(data) and _totp_secret_from_data(data))
+    allow_takeover = bool(
+        force_email_otp_login
+        or (_allow_passwordless_takeover() and not account_mfa_configured)
+    )
 
     if _codex_oauth_protocol_ready_stage(stage):
         final = _finish_authorization(session, oauth, did, current_url, proxy=proxy, phone_pool=phone_pool, phone_probe_only=phone_probe_only)
@@ -259,7 +264,7 @@ def _run_protocol_login_stages(
             final.setdefault("protocol_stage", stage)
         return final
 
-    if force_email_otp_login and stage not in {"email_otp", "callback", "consent", "add_phone"}:
+    if force_email_otp_login and not account_mfa_configured and stage not in {"email_otp", "callback", "consent", "add_phone", "totp"}:
         print(f"[*] force_email_otp_login: overriding stage '{stage}' -> 'email_otp'")
         stage = "email_otp"
     elif stage in {"email", "unknown"}:
@@ -322,6 +327,19 @@ def _run_protocol_login_stages(
         email_otp_result.setdefault("fallback_from", "password_login_failed")
         email_otp_result["password_attempt"] = password_result
         return email_otp_result
+    elif stage == "totp":
+        totp_result = _complete_totp_and_finish(
+            session=session,
+            oauth=oauth,
+            data=data,
+            did=did,
+            current_url=current_url,
+            proxy=proxy,
+            phone_pool=phone_pool,
+            phone_probe_only=phone_probe_only,
+        )
+        totp_result.setdefault("protocol_stage", "totp")
+        return totp_result
     elif stage == "add_phone":
         final = _finish_authorization(session, oauth, did, current_url, proxy=proxy, phone_pool=phone_pool, phone_probe_only=phone_probe_only)
         if final.get("ok"):
@@ -397,11 +415,14 @@ def _passwordless_login_and_exchange(
 
     issued_after = int(otp_issued_after_unix or time.time())
     pending_send = False
-    if initial_otp_requested:
+    authorize_continue_started_otp = bool(
+        initial_otp_requested and _needs_email_otp(current_url)
+    )
+    if authorize_continue_started_otp:
         delivery_attempts = [{"operation": "authorize_continue", "status_code": 200}]
     else:
-        # Compatibility path for callers that enter the verification page
-        # without going through /authorize/continue in this process.
+        # authorize/continue only starts OTP delivery when it lands on the
+        # verification page. A password-page takeover needs an explicit send.
         send_result = _send_passwordless_otp(session, did, current_url)
         delivery_attempts = [
             {"operation": "send", "status_code": int(send_result.get("status_code") or 0)}
@@ -425,9 +446,29 @@ def _passwordless_login_and_exchange(
                 "fallback_from": reason,
                 "last_url": _safe_url(current_url),
             }
-
-    attempts = max(1, min(int((CFG.get("email_registration") or {}).get("max_otp_retries") or 3), 5))
-    total_poll_timeout = min(max(int(timeout or 180), 1), 300)
+    email_cfg = CFG.get("email_registration") or {}
+    attempts = max(1, min(int(email_cfg.get("max_otp_retries") or 3), 5))
+    requested_poll_timeout = max(int(timeout or 180), 1)
+    provider = str(getattr(mailbox, "provider", "") or "").strip().lower()
+    if provider == "url_html":
+        try:
+            url_mailbox_timeout = max(
+                1,
+                int(email_cfg.get("url_html_otp_timeout_seconds") or 300),
+            )
+        except (TypeError, ValueError):
+            url_mailbox_timeout = 300
+        total_poll_timeout = min(
+            max(requested_poll_timeout, url_mailbox_timeout),
+            1800,
+        )
+        if total_poll_timeout > requested_poll_timeout:
+            print(
+                "[*] URL mailbox OTP wait extended: "
+                f"{requested_poll_timeout}s -> {total_poll_timeout}s"
+            )
+    else:
+        total_poll_timeout = min(requested_poll_timeout, 300)
     attempt_poll_timeout = max(1, total_poll_timeout // attempts)
     last_error = ""
     last_validate_body = ""
@@ -545,7 +586,7 @@ def _passwordless_login_and_exchange(
 
 
 def _password_login_and_exchange(session, oauth, data, did, current_url, proxy=None, timeout=180, phone_pool=None, phone_probe_only=False):
-    password = str(data.get("password") or "").strip()
+    password = _account_password_from_data(data)
     if not password:
         return {
             "ok": False,
@@ -582,6 +623,12 @@ def _password_login_and_exchange(session, oauth, data, did, current_url, proxy=N
             "login_method": "password",
         }
 
+    if _needs_totp(current_url) or _response_requires_totp(response):
+        totp_result = _complete_totp(session, data, did, current_url)
+        if not totp_result.get("ok"):
+            return totp_result
+        _, current_url = _follow_redirects(session, totp_result.get("next_url", current_url), proxy=proxy)
+
     if _needs_email_otp(current_url):
         email_otp_result = _complete_email_otp(session, data, did, current_url, proxy=proxy, timeout=timeout)
         if not email_otp_result.get("ok"):
@@ -597,6 +644,147 @@ def _password_login_and_exchange(session, oauth, data, did, current_url, proxy=N
         final["error"] = phone_attempt.get("error")
     final.setdefault("mode", "codex_oauth_pkce")
     final.setdefault("error", "password_login_oauth_callback_not_reached")
+    return final
+
+
+def _account_mfa_data(data):
+    mailbox = data.get("mailbox") if isinstance(data, dict) and isinstance(data.get("mailbox"), dict) else {}
+    if str(mailbox.get("provider") or "").strip().lower() == "account_mfa":
+        return mailbox
+    return data if isinstance(data, dict) else {}
+
+
+def _account_password_from_data(data):
+    account_data = _account_mfa_data(data)
+    return str(account_data.get("password") or "").strip()
+
+
+def _totp_secret_from_data(data):
+    account_data = _account_mfa_data(data)
+    return str(account_data.get("totp_secret") or "").strip()
+
+
+def _response_requires_totp(response):
+    try:
+        body = response.json()
+    except Exception:
+        return False
+    if not isinstance(body, dict):
+        return False
+    for key in ("mfa_required", "requires_mfa", "mfaRequired", "requiresMfa", "mfa_pending"):
+        if body.get(key) is True:
+            return True
+    nested = body.get("error") if isinstance(body.get("error"), dict) else {}
+    return any(nested.get(key) is True for key in ("mfa_required", "requires_mfa", "mfaRequired", "requiresMfa"))
+
+
+def _mfa_challenge_id(url):
+    """Extract the challenge identifier embedded in an MFA challenge URL."""
+    try:
+        path = urllib.parse.urlparse(str(url or "")).path
+    except Exception:
+        return ""
+    parts = [urllib.parse.unquote(part).strip() for part in path.split("/") if part.strip()]
+    for index, part in enumerate(parts[:-1]):
+        if part.lower() == "mfa-challenge":
+            return parts[index + 1]
+    return ""
+
+
+def _complete_totp(session, data, did, current_url, timeout=30):
+    secret = _totp_secret_from_data(data)
+    if not secret:
+        return {
+            "ok": False,
+            "mode": "codex_oauth_pkce",
+            "error": "totp_required_missing_secret",
+            "last_url": _safe_url(current_url),
+            "message": "OpenAI requested authenticator MFA, but no local TOTP secret is configured.",
+        }
+    challenge_id = _mfa_challenge_id(current_url)
+    if not challenge_id:
+        return {
+            "ok": False,
+            "mode": "codex_oauth_pkce",
+            "error": "totp_challenge_missing_id",
+            "last_url": _safe_url(current_url),
+            "message": "OpenAI requested authenticator MFA, but the challenge URL did not contain an id.",
+        }
+    try:
+        code = generate_totp(secret)
+    except ValueError:
+        return {
+            "ok": False,
+            "mode": "codex_oauth_pkce",
+            "error": "totp_secret_invalid",
+            "last_url": _safe_url(current_url),
+            "message": "The local TOTP secret is not a valid Base32 value.",
+        }
+
+    headers = with_sentinel(
+        _oai_headers(
+            did,
+            {
+                "Referer": current_url,
+                "Origin": "https://auth.openai.com",
+                "content-type": "application/json",
+            },
+        ),
+        load_cached_sentinel(),
+    )
+    try:
+        challenge = session.post(
+            "https://auth.openai.com/api/accounts/mfa/issue_challenge",
+            headers=headers,
+            json={"type": "totp", "id": challenge_id},
+            timeout=timeout,
+            impersonate=auth_impersonate(),
+        )
+        if int(challenge.status_code or 0) != 200:
+            return {
+                "ok": False,
+                "mode": "codex_oauth_pkce",
+                "error": f"totp_challenge_failed:{challenge.status_code}",
+                "last_url": _safe_url(current_url),
+                "body": challenge.text[:300],
+            }
+        verify = session.post(
+            "https://auth.openai.com/api/accounts/mfa/verify",
+            headers=headers,
+            json={"code": code, "type": "totp", "id": challenge_id},
+            timeout=timeout,
+            impersonate=auth_impersonate(),
+        )
+    except Exception as exc:
+        return {
+            "ok": False,
+            "mode": "codex_oauth_pkce",
+            "error": f"totp_verify_error:{exc}",
+            "last_url": _safe_url(current_url),
+        }
+    if int(verify.status_code or 0) != 200:
+        return {
+            "ok": False,
+            "mode": "codex_oauth_pkce",
+            "error": f"totp_verify_failed:{verify.status_code}",
+            "last_url": _safe_url(current_url),
+            "body": verify.text[:300],
+        }
+    print("[*] ChatGPT authenticator MFA verified")
+    return {"ok": True, "next_url": _next_url(verify) or current_url}
+
+
+def _complete_totp_and_finish(session, oauth, data, did, current_url, proxy=None, phone_pool=None, phone_probe_only=False):
+    totp_result = _complete_totp(session, data, did, current_url)
+    if not totp_result.get("ok"):
+        return totp_result
+    _, next_url = _follow_redirects(session, totp_result.get("next_url") or current_url, proxy=proxy)
+    final = _finish_authorization(session, oauth, did, next_url, proxy=proxy, phone_pool=phone_pool, phone_probe_only=phone_probe_only)
+    if final.get("ok"):
+        final["login_method"] = "password_totp"
+        return final
+    final.setdefault("mode", "codex_oauth_pkce")
+    final.setdefault("error", "totp_oauth_callback_not_reached")
     return final
 
 
@@ -1084,6 +1272,7 @@ def _mailbox_from_data(data):
         email=email,
         password=str(mailbox_password or "").strip(),
         login_password=str(mailbox.get("login_password") or "").strip(),
+        totp_secret=str(mailbox.get("totp_secret") or "").strip(),
         refresh_token=refresh_token,
         access_token=str(mailbox.get("access_token") or "").strip(),
         token=str(mailbox.get("token") or "").strip(),
@@ -1148,6 +1337,11 @@ def _needs_email_otp(url):
     return "email-verification" in value or "email-otp" in value
 
 
+def _needs_totp(url):
+    value = str(url or "").lower()
+    return any(marker in value for marker in ("/mfa", "multi-factor", "two-factor", "/2fa"))
+
+
 def _needs_password(url):
     value = str(url or "").lower()
     return "/log-in/password" in value or "/login/password" in value or value.endswith("/password")
@@ -1167,6 +1361,8 @@ def _detect_protocol_stage(url):
         return "add_phone"
     if _needs_email_otp(lower):
         return "email_otp"
+    if _needs_totp(lower):
+        return "totp"
     if _needs_password(lower):
         return "password"
     if lower.endswith("/consent") or lower.endswith("/workspace"):

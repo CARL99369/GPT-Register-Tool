@@ -655,7 +655,7 @@ namespace SmsWorkbench
             bool hasRt = refreshTokenStatus.Equals("oauth_present", StringComparison.OrdinalIgnoreCase)
                 || refreshTokenStatus.Equals("legacy_present", StringComparison.OrdinalIgnoreCase);
             if (status.Equals("account_deactivated", StringComparison.OrdinalIgnoreCase)
-                || LooksAccountDeactivatedError(error)) return "账号掉号";
+                || LooksAccountDeactivatedError(error)) return "停用";
             if (hasRt && LooksPhoneVerificationError(error)) return "手机验证";
             if (status.Equals("at_invalid", StringComparison.OrdinalIgnoreCase)
                 || status.Equals("access_token_invalid", StringComparison.OrdinalIgnoreCase)

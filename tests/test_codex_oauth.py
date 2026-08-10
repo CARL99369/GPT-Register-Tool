@@ -188,6 +188,86 @@ class CodexOauthTests(unittest.TestCase):
         self.assertEqual(codex_oauth._detect_protocol_stage("https://auth.openai.com/log-in/password"), "password")
         self.assertEqual(codex_oauth._detect_protocol_stage("https://auth.openai.com/email-verification"), "email_otp")
         self.assertEqual(codex_oauth._detect_protocol_stage("https://auth.openai.com/add-phone"), "add_phone")
+        self.assertEqual(codex_oauth._detect_protocol_stage("https://auth.openai.com/mfa"), "totp")
+
+    def test_password_login_reads_totp_secret_from_account_mfa_mailbox(self):
+        session = Mock()
+        response = Mock(status_code=200)
+        session.post.return_value = response
+
+        with patch("sms_tool.codex_oauth.load_cached_sentinel", return_value={}), \
+             patch("sms_tool.codex_oauth._next_url", return_value="https://auth.openai.com/mfa"), \
+             patch("sms_tool.codex_oauth._follow_redirects", return_value=(None, "https://auth.openai.com/mfa")), \
+             patch("sms_tool.codex_oauth._complete_totp", return_value={"ok": True, "next_url": "https://auth.openai.com/consent"}) as complete_totp, \
+             patch("sms_tool.codex_oauth._finish_authorization", return_value={"ok": True, "tokens": {"access_token": "at", "refresh_token": "rt_1"}}):
+            result = codex_oauth._password_login_and_exchange(
+                session=session,
+                oauth={"state": "s", "code_verifier": "v", "redirect_uri": "http://localhost"},
+                data={
+                    "email": "user@example.com",
+                    "mailbox": {
+                        "provider": "account_mfa",
+                        "password": "Secret!A1",
+                        "totp_secret": "JBSWY3DPEHPK3PXP",
+                    },
+                },
+                did="did",
+                current_url="https://auth.openai.com/log-in/password",
+            )
+
+        self.assertTrue(result["ok"])
+        complete_totp.assert_called_once()
+
+    def test_complete_totp_issues_challenge_and_verifies_local_code(self):
+        session = Mock()
+        issue = Mock(status_code=200, text='{}')
+        verify = Mock(status_code=200, text='{}')
+        session.post.side_effect = [issue, verify]
+
+        with patch("sms_tool.codex_oauth.generate_totp", return_value="123456") as generate, \
+             patch("sms_tool.codex_oauth.load_cached_sentinel", return_value={}), \
+             patch("sms_tool.codex_oauth._next_url", return_value="https://auth.openai.com/consent"):
+            result = codex_oauth._complete_totp(
+                session,
+                {"mailbox": {"provider": "account_mfa", "totp_secret": "JBSWY3DPEHPK3PXP"}},
+                "did",
+                "https://auth.openai.com/mfa-challenge/challenge-123",
+            )
+
+        self.assertTrue(result["ok"])
+        generate.assert_called_once_with("JBSWY3DPEHPK3PXP")
+        self.assertEqual(session.post.call_args_list[0].args[0], "https://auth.openai.com/api/accounts/mfa/issue_challenge")
+        self.assertEqual(
+            session.post.call_args_list[0].kwargs["json"],
+            {"type": "totp", "id": "challenge-123"},
+        )
+        self.assertEqual(session.post.call_args_list[1].args[0], "https://auth.openai.com/api/accounts/mfa/verify")
+        self.assertEqual(
+            session.post.call_args_list[1].kwargs["json"],
+            {"code": "123456", "type": "totp", "id": "challenge-123"},
+        )
+
+    def test_password_login_handles_mfa_required_response_before_redirect(self):
+        session = Mock()
+        password_response = Mock(status_code=200, text='{"mfa_required":true}')
+        password_response.json.return_value = {"mfa_required": True}
+        session.post.return_value = password_response
+
+        with patch("sms_tool.codex_oauth.load_cached_sentinel", return_value={}), \
+             patch("sms_tool.codex_oauth._next_url", return_value="https://auth.openai.com/consent"), \
+             patch("sms_tool.codex_oauth._follow_redirects", return_value=(None, "https://auth.openai.com/consent")), \
+             patch("sms_tool.codex_oauth._complete_totp", return_value={"ok": True, "next_url": "https://auth.openai.com/consent"}) as complete_totp, \
+             patch("sms_tool.codex_oauth._finish_authorization", return_value={"ok": True, "tokens": {"access_token": "at", "refresh_token": "rt_1"}}):
+            result = codex_oauth._password_login_and_exchange(
+                session=session,
+                oauth={"state": "s", "code_verifier": "v", "redirect_uri": "http://localhost"},
+                data={"password": "Secret!A1", "totp_secret": "JBSWY3DPEHPK3PXP"},
+                did="did",
+                current_url="https://auth.openai.com/log-in/password",
+            )
+
+        self.assertTrue(result["ok"])
+        complete_totp.assert_called_once()
 
     def test_logged_in_oauth_does_not_force_passwordless_otp(self):
         session = Mock()
@@ -305,6 +385,35 @@ class CodexOauthTests(unittest.TestCase):
         self.assertEqual(result["error"], "passwordless_email_otp_poll_timeout")
         self.assertEqual(result["protocol_stage"], "email_otp")
         self.assertEqual(result["fallback_from"], "email_otp_forced")
+
+    def test_account_mfa_does_not_hide_totp_failure_with_mailbox_fallback(self):
+        session = Mock()
+        password_result = {
+            "ok": False,
+            "error": "totp_challenge_failed:400",
+            "last_url": "https://auth.openai.com/mfa-challenge/test",
+        }
+        with patch("sms_tool.codex_oauth._detect_protocol_stage", return_value="password"), \
+             patch("sms_tool.codex_oauth._password_login_and_exchange", return_value=password_result), \
+             patch("sms_tool.codex_oauth._passwordless_login_and_exchange") as passwordless:
+            result = codex_oauth._run_protocol_login_stages(
+                session=session,
+                oauth={"state": "s", "code_verifier": "v", "redirect_uri": "http://localhost"},
+                email="user@example.com",
+                data={
+                    "email": "user@example.com",
+                    "mailbox": {
+                        "provider": "account_mfa",
+                        "password": "Secret!A1",
+                        "totp_secret": "JBSWY3DPEHPK3PXP",
+                    },
+                },
+                did="did",
+                current_url="https://auth.openai.com/log-in/password",
+            )
+
+        self.assertEqual(result, password_result)
+        passwordless.assert_not_called()
 
     def test_forced_email_otp_preserves_passwordless_failure(self):
         session = Mock()
@@ -449,6 +558,30 @@ class CodexOauthTests(unittest.TestCase):
             [{"operation": "authorize_continue", "status_code": 200}],
         )
 
+    def test_authorize_continue_on_password_page_explicitly_sends_email_otp(self):
+        session = Mock()
+        send_result = {"ok": True, "status_code": 200}
+
+        with patch.dict(codex_oauth.CFG, {"email_registration": {"max_otp_retries": 1}}, clear=False), \
+             patch("sms_tool.codex_oauth._send_passwordless_otp", return_value=send_result) as send, \
+             patch("sms_tool.codex_oauth._poll_email_otp", return_value=None):
+            result = codex_oauth._passwordless_login_and_exchange(
+                session=session,
+                oauth={"state": "s", "code_verifier": "v", "redirect_uri": "http://localhost"},
+                data={"email": "user@example.com", "mailbox": {"email": "user@example.com", "provider": "url_html", "inbox_url": "https://mail.example.test/inbox"}},
+                did="did",
+                current_url="https://auth.openai.com/log-in/password",
+                timeout=30,
+                initial_otp_requested=True,
+                otp_issued_after_unix=1234,
+            )
+
+        send.assert_called_once_with(session, "did", "https://auth.openai.com/log-in/password")
+        self.assertEqual(
+            result["otp_delivery"]["attempts"],
+            [{"operation": "send", "status_code": 200}],
+        )
+
     def test_passwordless_timeout_uses_resend_before_retry(self):
         page = Mock(status_code=200, url="https://auth.openai.com/email-verification", headers={})
         initial_send = Mock(status_code=200, text="{}")
@@ -500,6 +633,34 @@ class CodexOauthTests(unittest.TestCase):
             )
 
         self.assertEqual(poll_timeouts, [20, 20, 20])
+
+    def test_url_mailbox_uses_five_minute_poll_budget_by_default(self):
+        page = Mock(status_code=200, url="https://auth.openai.com/email-verification", headers={})
+        accepted = Mock(status_code=200, text='{"success":true}')
+        session = Mock()
+        session.get.return_value = page
+        session.post.return_value = accepted
+        poll_timeouts = []
+
+        def poll(*args, **kwargs):
+            poll_timeouts.append(kwargs["timeout"])
+            return None
+
+        with patch.dict(codex_oauth.CFG, {"email_registration": {"max_otp_retries": 3}}, clear=False), \
+             patch("sms_tool.codex_oauth._poll_email_otp", side_effect=poll), \
+             patch("sms_tool.codex_oauth.load_cached_sentinel", return_value={}):
+            codex_oauth._passwordless_login_and_exchange(
+                session=session,
+                oauth={"state": "s", "code_verifier": "v", "redirect_uri": "http://localhost"},
+                data={"email": "user@example.com", "mailbox": {"email": "user@example.com", "provider": "url_html", "inbox_url": "https://mail.example.test/inbox"}},
+                did="did",
+                current_url="https://auth.openai.com/email-verification",
+                timeout=60,
+                initial_otp_requested=True,
+                otp_issued_after_unix=1234,
+            )
+
+        self.assertEqual(poll_timeouts, [100, 100, 100])
 
     def test_send_accepted_without_new_mail_reports_not_delivered(self):
         page = Mock(status_code=200, url="https://auth.openai.com/email-verification", headers={})
