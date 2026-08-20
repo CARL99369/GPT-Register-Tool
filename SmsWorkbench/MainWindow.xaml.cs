@@ -6,32 +6,19 @@ namespace SmsWorkbench
         private static readonly HttpClient httpClient = new HttpClient();
         private const string LocalNonPaymentProxy = "http://127.0.0.1:7897";
         private readonly IBackendClient backendClient;
+        private readonly IBackendTaskCoordinator backendTasks;
+        private readonly IDesktopReadClient desktopRead;
         private readonly Serilog.ILogger logger;
         private readonly IPaymentBatchDialogService paymentBatchDialogs;
         private readonly IStandaloneServiceController standaloneServiceController;
         private readonly IFileLauncher fileLauncher;
+        private readonly IProtocolPaymentDialogService protocolPaymentDialogs;
         private readonly Wpf.Ui.ISnackbarService snackbarService;
         private readonly ISettingsDialogService settingsDialogs;
-        private static readonly ConfigComboOption[] BillingRegionOptions = new[]
-        {
-            new ConfigComboOption("JP", "日本 / Japan (JPY)", "Japan", "JPY"),
-            new ConfigComboOption("US", "美国 / United States (USD)", "United States", "USD"),
-            new ConfigComboOption("AU", "澳大利亚 / Australia (AUD)", "Australia", "AUD"),
-            new ConfigComboOption("DE", "德国 / Germany (EUR)", "Germany", "EUR"),
-            new ConfigComboOption("FR", "法国 / France (EUR)", "France", "EUR"),
-            new ConfigComboOption("GB", "英国 / United Kingdom (GBP)", "United Kingdom", "GBP"),
-            new ConfigComboOption("IN", "印度 / India (INR)", "India", "INR"),
-            new ConfigComboOption("BR", "巴西 / Brazil (BRL)", "Brazil", "BRL"),
-        };
-        private static readonly ConfigComboOption[] LinkGenerationTypeOptions = new[]
-        {
-            new ConfigComboOption("hosted_long_url", "托管长链接 / Hosted Long URL", "hosted_long_url", "hosted_long_url"),
-            new ConfigComboOption("paypal_direct", "PayPal 直链 / PayPal Direct", "paypal_direct", "paypal_direct"),
-            new ConfigComboOption("paypal_direct_zero_due", "PayPal 直链零金额 / PayPal Direct Zero Due", "paypal_direct_zero_due", "paypal_direct_zero_due"),
-        };
+        private readonly ISettingsService settingsService;
+        private readonly IPaymentBatchService paymentBatchService;
         private readonly string rootDir;
         private readonly ObservableCollection<PoolRow> allRows = new ObservableCollection<PoolRow>();
-        private CancellationTokenSource runningBackendCancellation;
         private int taskSeq = 1;
         private string searchText = "";
         private string countText = "1";
@@ -47,6 +34,8 @@ namespace SmsWorkbench
         private string attentionCountText = "0";
         private int currentPage = 1;
         private int filteredCount;
+        private string accountSortMember = "";
+        private ListSortDirection? accountSortDirection;
         private bool sidebarCollapsed;
         private string sidebarToggleGlyph = "‹";
         private Geometry sidebarToggleGeometry = Geometry.Parse("M15 18l-6-6 6-6");
@@ -203,19 +192,29 @@ namespace SmsWorkbench
         public MainWindow(
             IApplicationPaths paths,
             IBackendClient backendClient,
+            IBackendTaskCoordinator backendTasks,
+            IDesktopReadClient desktopRead,
             IPaymentBatchDialogService paymentBatchDialogs,
             IStandaloneServiceController standaloneServiceController,
             IFileLauncher fileLauncher,
+            IProtocolPaymentDialogService protocolPaymentDialogs,
+            IPaymentBatchService paymentBatchService,
             Wpf.Ui.ISnackbarService snackbarService,
             ISettingsDialogService settingsDialogs,
+            ISettingsService settingsService,
             Serilog.ILogger logger)
         {
             this.backendClient = backendClient;
+            this.backendTasks = backendTasks;
+            this.desktopRead = desktopRead;
             this.paymentBatchDialogs = paymentBatchDialogs;
             this.standaloneServiceController = standaloneServiceController;
             this.fileLauncher = fileLauncher;
+            this.protocolPaymentDialogs = protocolPaymentDialogs;
+            this.paymentBatchService = paymentBatchService;
             this.snackbarService = snackbarService;
             this.settingsDialogs = settingsDialogs;
+            this.settingsService = settingsService;
             this.logger = logger;
             rootDir = paths.RootDirectory;
             standaloneWebViewDataDirectory = paths.StandaloneWebViewDataDirectory;
@@ -231,6 +230,34 @@ namespace SmsWorkbench
             ScopeFilter = "全部";
             RefreshPools();
             ApplySidebarCompact(false);
+        }
+
+        internal MainWindow(
+            IApplicationPaths paths,
+            IBackendClient backendClient,
+            IBackendTaskCoordinator backendTasks,
+            IDesktopReadClient desktopRead,
+            IPaymentBatchDialogService paymentBatchDialogs,
+            IPaymentBatchService paymentBatchService,
+            Wpf.Ui.ISnackbarService snackbarService,
+            ISettingsDialogService settingsDialogs,
+            ISettingsService settingsService,
+            Serilog.ILogger logger)
+            : this(
+                paths,
+                backendClient,
+                backendTasks,
+                desktopRead,
+                paymentBatchDialogs,
+                null,
+                null,
+                null,
+                paymentBatchService,
+                snackbarService,
+                settingsDialogs,
+                settingsService,
+                logger)
+        {
         }
 
         // Moved to MainWindow.Pools.cs: Pool/session loading, filtering, overview.
@@ -262,21 +289,18 @@ namespace SmsWorkbench
         public string Identifier { get; set; } = "";
         public string AccountType { get; set; } = "";
         public string AccountPlanType { get; set; } = "";
+        public string Source { get; set; } = "";
+        public string RegisterMethod { get; set; } = "";
+        public string SessionType { get; set; } = "";
+        public string PlanType { get; set; } = "";
         public string RegistrationCountry { get; set; } = "";
-        public string QuotaStatus { get; set; } = "";
-        public string Quota5hUsed { get; set; } = "";
-        public string Quota5hLimit { get; set; } = "";
-        public string Quota5hRemaining { get; set; } = "";
-        public string Quota5hPercent { get; set; } = "";
-        public string Quota7dUsed { get; set; } = "";
-        public string Quota7dLimit { get; set; } = "";
-        public string Quota7dRemaining { get; set; } = "";
-        public string Quota7dPercent { get; set; } = "";
         public string Status { get; set; } = "";
         public string LatestOperationStatus { get; set; } = "";
         public string PayPalStatus { get; set; } = "";
         public string PayPalAmount { get; set; } = "";
+        public string PromotionStatus { get; set; } = "";
         public string RefreshTokenStatus { get; set; } = "";
+        public string TwoFactorStatus { get; set; } = "未设置";
         public string Phone { get; set; } = "";
         public bool HasAccessToken { get; set; }
         public string AccessTokenProbeStatusCode { get; set; } = "";
@@ -299,11 +323,14 @@ namespace SmsWorkbench
         public string Source { get; set; } = "pool";
         public int Count { get; set; } = 1;
         public int Workers { get; set; } = 4;
+        public bool Disable2fa { get; set; } = true;
+        public bool CheckPromotion { get; set; }
     }
 
     public sealed class ScanOptions
     {
         public int Workers { get; set; } = 4;
+        public bool AutoRelogin { get; set; }
     }
 
     public sealed partial class TaskRow : ObservableObject
@@ -317,192 +344,12 @@ namespace SmsWorkbench
         public string Retry { get; set; } = "0";
     }
 
-    internal static class SqliteNative
-    {
-        private const int SQLITE_OK = 0;
-        private const int SQLITE_ROW = 100;
-        private const int SQLITE_DONE = 101;
-        private const int SQLITE_OPEN_READONLY = 0x00000001;
-        private const int SQLITE_OPEN_READWRITE = 0x00000002;
-
-        [DllImport("winsqlite3", CallingConvention = CallingConvention.Cdecl)]
-        private static extern int sqlite3_open_v2(byte[] filename, out IntPtr db, int flags, IntPtr vfs);
-
-        [DllImport("winsqlite3", CallingConvention = CallingConvention.Cdecl)]
-        private static extern int sqlite3_close(IntPtr db);
-
-        [DllImport("winsqlite3", CallingConvention = CallingConvention.Cdecl)]
-        private static extern int sqlite3_prepare_v2(IntPtr db, byte[] sql, int numBytes, out IntPtr stmt, IntPtr tail);
-
-        [DllImport("winsqlite3", CallingConvention = CallingConvention.Cdecl)]
-        private static extern int sqlite3_step(IntPtr stmt);
-
-        [DllImport("winsqlite3", CallingConvention = CallingConvention.Cdecl)]
-        private static extern int sqlite3_finalize(IntPtr stmt);
-
-        [DllImport("winsqlite3", CallingConvention = CallingConvention.Cdecl)]
-        private static extern int sqlite3_column_count(IntPtr stmt);
-
-        [DllImport("winsqlite3", CallingConvention = CallingConvention.Cdecl)]
-        private static extern IntPtr sqlite3_column_name(IntPtr stmt, int index);
-
-        [DllImport("winsqlite3", CallingConvention = CallingConvention.Cdecl)]
-        private static extern IntPtr sqlite3_column_text(IntPtr stmt, int index);
-
-        [DllImport("winsqlite3", CallingConvention = CallingConvention.Cdecl)]
-        private static extern int sqlite3_column_bytes(IntPtr stmt, int index);
-
-        [DllImport("winsqlite3", CallingConvention = CallingConvention.Cdecl)]
-        private static extern IntPtr sqlite3_errmsg(IntPtr db);
-
-        public static List<Dictionary<string, string>> Query(string path, string sql)
-        {
-            IntPtr db = Open(path, SQLITE_OPEN_READONLY);
-            try
-            {
-                IntPtr stmt = Prepare(db, sql);
-                try
-                {
-                    var rows = new List<Dictionary<string, string>>();
-                    int columnCount = sqlite3_column_count(stmt);
-                    while (sqlite3_step(stmt) == SQLITE_ROW)
-                    {
-                        var row = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-                        for (int i = 0; i < columnCount; i++)
-                        {
-                            row[PtrToString(sqlite3_column_name(stmt, i), -1)] = ColumnText(stmt, i);
-                        }
-                        rows.Add(row);
-                    }
-                    return rows;
-                }
-                finally
-                {
-                    sqlite3_finalize(stmt);
-                }
-            }
-            finally
-            {
-                sqlite3_close(db);
-            }
-        }
-
-        public static void Execute(string path, string sql)
-        {
-            IntPtr db = Open(path, SQLITE_OPEN_READWRITE);
-            try
-            {
-                IntPtr stmt = Prepare(db, sql);
-                try
-                {
-                    int code = sqlite3_step(stmt);
-                    if (code != SQLITE_DONE && code != SQLITE_ROW) throw new InvalidOperationException(Error(db));
-                }
-                finally
-                {
-                    sqlite3_finalize(stmt);
-                }
-            }
-            finally
-            {
-                sqlite3_close(db);
-            }
-        }
-
-        private static IntPtr Open(string path, int flags)
-        {
-            int code = sqlite3_open_v2(NullTerminatedUtf8(path), out IntPtr db, flags, IntPtr.Zero);
-            if (code != SQLITE_OK) throw new InvalidOperationException(Error(db));
-            return db;
-        }
-
-        private static IntPtr Prepare(IntPtr db, string sql)
-        {
-            int code = sqlite3_prepare_v2(db, NullTerminatedUtf8(sql), -1, out IntPtr stmt, IntPtr.Zero);
-            if (code != SQLITE_OK) throw new InvalidOperationException(Error(db));
-            return stmt;
-        }
-
-        private static string Error(IntPtr db) => PtrToString(sqlite3_errmsg(db), -1);
-
-        private static string ColumnText(IntPtr stmt, int index)
-        {
-            int bytes = sqlite3_column_bytes(stmt, index);
-            return PtrToString(sqlite3_column_text(stmt, index), bytes);
-        }
-
-        private static string PtrToString(IntPtr ptr, int bytes)
-        {
-            if (ptr == IntPtr.Zero) return "";
-            if (bytes < 0)
-            {
-                int len = 0;
-                while (Marshal.ReadByte(ptr, len) != 0) len++;
-                bytes = len;
-            }
-            byte[] buffer = new byte[bytes];
-            Marshal.Copy(ptr, buffer, 0, bytes);
-            return Encoding.UTF8.GetString(buffer);
-        }
-
-        private static byte[] NullTerminatedUtf8(string value)
-        {
-            byte[] body = Encoding.UTF8.GetBytes(value ?? "");
-            byte[] output = new byte[body.Length + 1];
-            Buffer.BlockCopy(body, 0, output, 0, body.Length);
-            return output;
-        }
-    }
     public sealed class CollapsedLabelConverter : IValueConverter
     {
         public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
         {
             var label = parameter?.ToString() ?? string.Empty;
             return value is bool collapsed && collapsed ? string.Empty : label;
-        }
-
-        public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
-        {
-            throw new NotSupportedException();
-        }
-    }
-
-    /// <summary>
-    /// Converts a status string (e.g. "支付完成✅", "AT失效", "待处理") into a
-    /// severity keyword ("success", "warn", "danger", "info", "neutral") that
-    /// the StatusBadge style uses to pick the correct colour palette.
-    /// </summary>
-    public sealed class StatusSeverityConverter : IValueConverter
-    {
-        public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
-        {
-            string s = (value as string ?? "").Trim();
-            if (s.Length == 0) return "neutral";
-
-            // Success states (green)
-            if (s.Contains("\u6210\u529f")) return "success";
-            if (s.Contains("✅") || s.Contains("完成") || s.Contains("已注册")
-                || s.Contains("已获取") || s.Contains("已导入") || s.Contains("K12已进入")
-                || s.Contains("PM已创建"))
-                return "success";
-
-            // Danger states (red)
-            if (s.Contains("\u5931\u8d25")) return "danger";
-            if (s.Contains("失败") || s.Contains("失效") || s.Contains("掉号")
-                || s.Contains("异常") || s.Contains("无RT") || s.Contains("缺失")
-                || s.Contains("未获取") || s.Contains("K12未切换") || s.Contains("K12已退出"))
-                return "danger";
-
-            // Warning states (amber)
-            if (s.Contains("待") || s.Contains("缺") || s.Contains("OTP")
-                || s.Contains("K12已申请") || s.Contains("旧token"))
-                return "warn";
-
-            // Info states (grey-blue)
-            if (s.Contains("已保存") || s.Contains("待刷新") || s.Contains("未知"))
-                return "info";
-
-            return "neutral";
         }
 
         public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)

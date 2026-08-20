@@ -1,23 +1,20 @@
+using System.Text.Json.Nodes;
+
 namespace SmsWorkbench
 {
     public partial class MainWindow
     {
         private async Task<bool> ShowSms66OneClickDialogAsync()
         {
-            string path = Path.Combine(rootDir, "config.json");
-            EnsureConfigFile(path);
-            var config = ReadJsonObject(path);
-            var phoneReuse = GetSection(config, "phone_reuse");
-            var sms66 = GetChildSection(phoneReuse, "sms66");
-            string apiKey = ResolveSms66ApiKey(GetString(sms66, "api_key"));
+            string apiKey = ResolveSms66ApiKey(settingsService.GetString("phone_reuse.sms66.api_key"));
             if (apiKey.Length == 0)
             {
                 ShowThemedInfoDialog("SMS66 未配置", "请先在设置的手机接码分类中填写 SMS66 API Key。");
                 return false;
             }
 
-            string endpoint = FirstNonEmpty(GetString(sms66, "endpoint"), Sms66CatalogClient.DefaultEndpoint);
-            string projectId = FirstNonEmpty(GetString(sms66, "project_id"), Sms66CatalogClient.OpenAiProjectId);
+            string endpoint = FirstNonEmpty(settingsService.GetString("phone_reuse.sms66.endpoint"), Sms66CatalogClient.DefaultEndpoint);
+            string projectId = FirstNonEmpty(settingsService.GetString("phone_reuse.sms66.project_id"), Sms66CatalogClient.OpenAiProjectId);
             IReadOnlyList<Sms66PhoneChoice> available;
             try
             {
@@ -31,9 +28,6 @@ namespace SmsWorkbench
                 if (Sms66CatalogClient.IsDesignatedPurchaseUnavailable(exc))
                 {
                     return ContinueWithRandomSms66Purchase(
-                        config,
-                        phoneReuse,
-                        sms66,
                         projectId,
                         "项目 " + projectId + " 不支持指定号码库存，已切换为普通随机购买。");
                 }
@@ -48,15 +42,12 @@ namespace SmsWorkbench
             if (available.Count == 0)
             {
                 return ContinueWithRandomSms66Purchase(
-                    config,
-                    phoneReuse,
-                    sms66,
                     projectId,
                     "项目 " + projectId + " 当前没有指定库存，已切换为普通随机购买。");
             }
 
-            string savedPrefix = DigitsOnly(GetString(sms66, "phone_prefix"));
-            string savedPhone = NormalizeSms66Phone(GetString(sms66, "designated_phone"));
+            string savedPrefix = DigitsOnly(settingsService.GetString("phone_reuse.sms66.phone_prefix"));
+            string savedPhone = NormalizeSms66Phone(settingsService.GetString("phone_reuse.sms66.designated_phone"));
             var dialog = new Window
             {
                 Title = "SMS66 选号",
@@ -177,30 +168,33 @@ namespace SmsWorkbench
             if (dialog.ShowDialog() != true || phoneBox.SelectedItem is not Sms66PhoneChoice chosen)
                 return false;
 
-            sms66["project_id"] = projectId;
-            sms66["phone_prefix"] = DigitsOnly(prefixBox.Text);
-            sms66["designated_phone"] = chosen.Phone;
-            phoneReuse["source"] = "sms66";
-            phoneReuse["sms66"] = sms66;
-            SaveConfig(path, config);
+            settingsService.UpdateConfig(root =>
+            {
+                JsonObject phoneReuse = GetOrCreateSection(root, "phone_reuse");
+                JsonObject sms66 = GetOrCreateSection(phoneReuse, "sms66");
+                phoneReuse["source"] = "sms66";
+                sms66["project_id"] = projectId;
+                sms66["phone_prefix"] = DigitsOnly(prefixBox.Text);
+                sms66["designated_phone"] = chosen.Phone;
+            });
             return true;
         }
 
         private bool ContinueWithRandomSms66Purchase(
-            Dictionary<string, object> config,
-            Dictionary<string, object> phoneReuse,
-            Dictionary<string, object> sms66,
             string projectId,
             string message)
         {
-            sms66["project_id"] = projectId;
-            sms66["phone_prefix"] = "";
-            sms66["designated_phone"] = "";
-            phoneReuse["source"] = "sms66";
-            phoneReuse["sms66"] = sms66;
             try
             {
-                SaveConfig(Path.Combine(rootDir, "config.json"), config);
+                settingsService.UpdateConfig(root =>
+                {
+                    JsonObject phoneReuse = GetOrCreateSection(root, "phone_reuse");
+                    JsonObject sms66 = GetOrCreateSection(phoneReuse, "sms66");
+                    phoneReuse["source"] = "sms66";
+                    sms66["project_id"] = projectId;
+                    sms66["phone_prefix"] = "";
+                    sms66["designated_phone"] = "";
+                });
             }
             catch (Exception exc)
             {

@@ -11,8 +11,9 @@ import base64
 import json
 import re
 from typing import Any
-
 from curl_cffi import requests as curl_requests
+
+from .phone_proxy import normalize_proxy_url, redact_proxy_url as _redact_proxy_url
 
 
 CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
@@ -21,6 +22,11 @@ CODEX_QUOTA_HEADERS = {
     "Content-Type": "application/json",
     "User-Agent": "codex_cli_rs/0.76.0 (Debian 13.0.0; x86_64) WindowsTerminal",
 }
+
+
+def redact_proxy_url(proxy: str | None) -> str:
+    """Return a log-safe proxy URL without exposing credentials (delegates to phone_proxy)."""
+    return _redact_proxy_url(proxy, empty_placeholder="")
 
 
 def probe_account_liveness(account: dict[str, Any], proxy: str | None = None, timeout: int = 30) -> dict[str, Any]:
@@ -48,7 +54,8 @@ def probe_account_liveness(account: dict[str, Any], proxy: str | None = None, ti
     account_id = account_chatgpt_id(account)
     if account_id:
         headers["Chatgpt-Account-Id"] = account_id
-    proxies = {"http": proxy, "https": proxy} if proxy else None
+    normalized_proxy = normalize_proxy_url(proxy)
+    proxies = {"http": normalized_proxy, "https": normalized_proxy} if normalized_proxy else None
     try:
         response = curl_requests.get(
             CODEX_USAGE_URL,
@@ -68,12 +75,16 @@ def probe_account_liveness(account: dict[str, Any], proxy: str | None = None, ti
             account_id=account_id,
         )
     except Exception as exc:
+        error = str(exc)
+        for candidate in (str(proxy or "").strip(), normalized_proxy):
+            if candidate:
+                error = error.replace(candidate, redact_proxy_url(candidate))
         return {
             "ok": False,
             "mode": "local",
             "status": "unknown",
             "quota_status": "检测失败",
-            "error": str(exc),
+            "error": error,
         }
 
 

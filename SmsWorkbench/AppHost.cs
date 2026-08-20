@@ -32,6 +32,8 @@ namespace SmsWorkbench
                     services.AddSingleton<Serilog.ILogger>(Log.Logger);
                     services.AddSingleton<IApplicationPaths>(paths);
                     services.AddSingleton<IBackendClient, PythonBackendClient>();
+                    services.AddSingleton<IBackendTaskCoordinator, BackendTaskCoordinator>();
+                    services.AddSingleton<IDesktopReadClient, DesktopReadClient>();
                     services.AddSingleton<Wpf.Ui.ISnackbarService, Wpf.Ui.SnackbarService>();
                     services.AddSingleton<IFileLauncher, FileLauncher>();
                     services.AddSingleton<IStandaloneProcessLauncher, StandaloneProcessLauncher>();
@@ -45,8 +47,11 @@ namespace SmsWorkbench
                             TimeSpan.FromMilliseconds(500),
                             240);
                     });
+                    services.AddSingleton<IStageMatrixStore, JsonlStageMatrixStore>();
                     services.AddSingleton<IPaymentBatchService, PaymentBatchService>();
                     services.AddSingleton<IPaymentBatchDialogService, PaymentBatchDialogService>();
+                    services.AddSingleton<IProtocolPaymentService, ProtocolPaymentService>();
+                    services.AddSingleton<IProtocolPaymentDialogService, ProtocolPaymentDialogService>();
                     services.AddSingleton<ISettingsService, SettingsService>();
                     services.AddSingleton<ISettingsDialogService, SettingsDialogService>();
                     services.AddSingleton<MainWindow>();

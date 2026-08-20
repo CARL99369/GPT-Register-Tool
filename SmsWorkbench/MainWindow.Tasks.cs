@@ -1,8 +1,84 @@
+using System.Text.Json;
+
 namespace SmsWorkbench
 {
     public partial class MainWindow
     {
-        // Backend process, task list, deletion and cancellation actions
+        // Backend process, task list, deletion and cancellation actions.
+        //
+        // CLI argument construction is delegated to BackendCommandPlanner;
+        // backend JSON business interpretation is delegated to
+        // BackendResultInterpreter.
+
+        private bool doctorProbeStarted;
+
+        // Long-running backend tasks (registration / payment batches) share one
+        // timeout budget; keep it a named constant instead of inline math.
+        private const int BackendTaskTimeoutMs = 12 * 60 * 60 * 1000;
+        private const int BackendTaskTimeoutSeconds = 12 * 60 * 60;
+        private DateTime lastHotPersistenceRefreshUtc = DateTime.MinValue;
+
+        /// <summary>
+        /// One-shot background environment probe (`python -m sms_tool --doctor --json`)
+        /// run straight through the backend client so the single-active-task
+        /// invariant is untouched. Surfaces missing interpreter/dependencies
+        /// with fix hints instead of letting them surface as per-task failures.
+        /// </summary>
+        internal async Task RunStartupDoctorProbeAsync()
+        {
+            if (doctorProbeStarted)
+                return;
+            doctorProbeStarted = true;
+            try
+            {
+                var command = BackendCommand.Create("doctor", new[] { "--doctor", "--json" }, 90 * 1000);
+                BackendCommandResult result = await backendClient.RunAsync(command).ConfigureAwait(true);
+                if (!result.Payload.HasValue)
+                {
+                    Log("[doctor] 环境自检未返回结构化结果(退出码 " + result.ExitCode + ")");
+                    return;
+                }
+                var fails = new List<string>();
+                int warned = 0;
+                foreach (JsonElement check in result.Payload.Value.GetProperty("checks").EnumerateArray())
+                {
+                    string status = check.TryGetProperty("status", out JsonElement statusElement) ? statusElement.GetString() : "";
+                    string name = check.TryGetProperty("name", out JsonElement nameElement) ? nameElement.GetString() : "";
+                    string hint = check.TryGetProperty("hint", out JsonElement hintElement) ? hintElement.GetString() : "";
+                    if (status == "fail")
+                        fails.Add(string.IsNullOrEmpty(hint) ? name : $"{name}: {hint}");
+                    else if (status == "warn")
+                        warned++;
+                }
+                if (fails.Count == 0)
+                {
+                    Log($"[doctor] 环境自检通过{(warned > 0 ? $"({warned} 项警告,详见设置与代理配置)" : "")}");
+                    return;
+                }
+                var detail = string.Join("\n  - ", fails);
+                Log("[doctor] 环境自检发现 " + fails.Count + " 项缺失依赖");
+                MessageBox.Show(
+                    this,
+                    $"环境自检发现 {fails.Count} 项必需依赖缺失:\n  - {detail}\n\n" +
+                    "可先运行: python -m pip install -r requirements.txt\n" +
+                    "或使用命令 python chatgpt_phone_reg.py --doctor 查看完整报告。",
+                    "环境自检",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Warning);
+            }
+            catch (Exception ex)
+            {
+                Log("[doctor] 环境自检失败: " + ex.Message);
+                MessageBox.Show(
+                    this,
+                    ex.Message + "\n\n桌面端依赖 Python 3.10+ 与 requirements.txt 中的依赖包。" +
+                    "\n安装后在 设置 → 数据与文件 → 运行环境 配置解释器路径,再重启本程序。",
+                    "无法启动 Python 后端",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Error);
+            }
+        }
+
         private void RerunFailed_Click(object sender, RoutedEventArgs e)
         {
             var failedRows = allRows.Where(r =>
@@ -19,24 +95,24 @@ namespace SmsWorkbench
             if (MessageBox.Show($"找到 {failedRows.Count} 条失败/待处理账号，确定重新注册？\n\n流程：注册→获取 access token→存 session 入库",
                 "确认重注册", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
 
-            string tempFile = Path.Combine(Path.GetTempPath(), "rerun_failed_" + DateTime.Now.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture) + ".txt");
-            var lines = new List<string>();
-            foreach (PoolRow row in failedRows)
+            if (!TryCreateMailboxFile(failedRows, out string mailboxArg, out string tempFile, out int mailboxCount))
             {
-                string line = row.RawLine.Trim();
-                if (line.Length > 0) lines.Add(line);
+                MessageBox.Show("失败记录缺少可用邮箱凭据，无法重新注册。", "格式不匹配", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
             }
-            File.WriteAllLines(tempFile, lines, new UTF8Encoding(false));
 
-            var args = new List<string> { "--chatai-mailbox-file", tempFile, "--count", lines.Count.ToString(CultureInfo.InvariantCulture), "--workers", "4" };
-            AddRegistrationProxy(args);
-            RunBackend("重新注册失败账号 (" + lines.Count + ")", args);
+            var plan = BackendCommandPlanner.CreateRerunFailedRegistration(
+                mailboxArg,
+                tempFile,
+                mailboxCount,
+                GetRegistrationProxyPool());
+            RunBackend(plan.TaskName, plan.Arguments.ToList());
         }
 
         private void RebuildSqlite_Click(object sender, RoutedEventArgs e)
         {
-            var args = new List<string> { "--rebuild-sqlite" };
-            RunBackend("重建SQLite索引", args);
+            var plan = BackendCommandPlanner.CreateRebuildSqlite();
+            RunBackend(plan.TaskName, plan.Arguments.ToList());
         }
 
         private void AccountGrid_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -55,12 +131,23 @@ namespace SmsWorkbench
             }
         }
 
-        private async void RunBackend(
+        private void RunBackend(
             string taskName,
             List<string> args,
-            IReadOnlyCollection<string>? cleanupFiles = null)
+            IReadOnlyCollection<string> cleanupFiles = null)
+            => RunUiTask(() => RunBackendAsync(taskName, args, cleanupFiles: cleanupFiles));
+
+        private void RunAccountBatchBackend(string taskName, List<string> args, string domain, int total)
+            => RunUiTask(() => RunBackendAsync(taskName, args, domain, total));
+
+        private async Task RunBackendAsync(
+            string taskName,
+            List<string> args,
+            string progressDomain = "",
+            int progressTotal = 0,
+            IReadOnlyCollection<string> cleanupFiles = null)
         {
-            if (runningBackendCancellation != null)
+            if (backendTasks.IsRunning)
             {
                 CleanupBackendFiles(cleanupFiles);
                 MessageBox.Show("已有批次正在运行，请先取消或等待完成。", "运行中", MessageBoxButton.OK, MessageBoxImage.Information);
@@ -72,6 +159,13 @@ namespace SmsWorkbench
             Tasks.Add(task);
             ScrollTaskGridToBottom();
             DateTime started = DateTime.Now;
+            AccountBatchProgressTracker accountProgress = string.IsNullOrWhiteSpace(progressDomain)
+                ? null
+                : new AccountBatchProgressTracker(progressDomain, progressTotal);
+            AccountBatchProgressDialog progressDialog = accountProgress == null
+                ? null
+                : new AccountBatchProgressDialog(this, taskName, progressTotal, () => backendTasks.Cancel());
+            progressDialog?.Show();
 
             var backendOutput = new StringBuilder();
             object backendOutputLock = new object();
@@ -85,22 +179,44 @@ namespace SmsWorkbench
 
             var progress = new Progress<BackendOutputLine>(line =>
             {
+                if (BackendProgressEventParser.TryParse(line.Text, out BackendProgressEvent progressEvent))
+                {
+                    if (accountProgress != null
+                        && string.Equals(progressEvent.Domain, accountProgress.Domain, StringComparison.OrdinalIgnoreCase))
+                    {
+                        accountProgress.Update(progressEvent);
+                        progressDialog?.Update(
+                            accountProgress.Completed,
+                            accountProgress.Total,
+                            progressEvent.AccountRef,
+                            progressEvent.Detail);
+                    }
+                    task.Info = progressEvent.Detail.Length > 0
+                        ? $"{progressEvent.Stage}: {progressEvent.Detail}"
+                        : progressEvent.Stage;
+                    return;
+                }
                 CaptureBackendLine(line.Text);
                 UiLog(line.Text);
+                RefreshPoolsAfterHotPersistence(line.Text);
             });
-            using var cancellation = new CancellationTokenSource();
-            runningBackendCancellation = cancellation;
-
             try
             {
                 Log("启动：python " + safeArgs);
                 StatusText = taskName + " 运行中";
-                BackendCommandResult result = await backendClient.RunAsync(
-                    BackendCommand.Create(taskName, args, 12 * 60 * 60 * 1000),
-                    progress,
-                    cancellation.Token);
+                BackendCommandResult result = await backendTasks.RunAsync(
+                    BackendCommand.Create(
+                        taskName,
+                        args,
+                        BackendTaskTimeoutMs,
+                        new Dictionary<string, string> { ["SMSWORKBENCH_EVENTS"] = "1" }),
+                    progress);
 
-                task.Status = result.ExitCode == 0 ? "完成" : "失败";
+                // Use BackendResultInterpreter to normalize the outcome
+                BackendExecutionResult interpreted = BackendResultInterpreter.Interpret(
+                    result, taskName, BackendTaskTimeoutSeconds);
+
+                task.Status = interpreted.IsSuccess ? "完成" : "失败";
                 task.Cost = ((int)(DateTime.Now - started).TotalSeconds).ToString(CultureInfo.InvariantCulture);
                 task.DoneAt = SafeTime(DateTime.Now);
                 StatusText = taskName + " 已结束";
@@ -122,6 +238,13 @@ namespace SmsWorkbench
                 task.DoneAt = SafeTime(DateTime.Now);
                 StatusText = taskName + " 已取消";
             }
+            catch (BackendTaskAlreadyRunningException)
+            {
+                task.Status = "未启动";
+                task.DoneAt = SafeTime(DateTime.Now);
+                StatusText = taskName + " 未启动";
+                MessageBox.Show("已有批次正在运行，请先取消或等待完成。", "运行中", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
             catch (Exception ex)
             {
                 task.Status = "启动失败";
@@ -129,13 +252,12 @@ namespace SmsWorkbench
             }
             finally
             {
-                if (ReferenceEquals(runningBackendCancellation, cancellation))
-                    runningBackendCancellation = null;
+                progressDialog?.Close();
                 CleanupBackendFiles(cleanupFiles);
             }
         }
 
-        private void CleanupBackendFiles(IEnumerable<string>? paths)
+        private void CleanupBackendFiles(IEnumerable<string> paths)
         {
             foreach (string path in paths ?? Array.Empty<string>())
             {
@@ -151,50 +273,29 @@ namespace SmsWorkbench
             }
         }
 
-        private string RunBackendWithResult(string taskName, List<string> args, int timeoutMs = 120000)
+        private async Task<string> RunBackendWithResultAsync(string taskName, List<string> args, int timeoutMs = 120000)
         {
             Log("启动：python " + FormatBackendArgsForDisplay(args));
-            BackendCommandResult result = backendClient.RunAsync(
-                BackendCommand.Create(taskName, args, timeoutMs)).GetAwaiter().GetResult();
-            if (result.Payload.HasValue)
-                return result.Payload.Value.GetRawText();
-            if (result.TimedOut)
-                throw new TimeoutException($"Backend execution timed out ({timeoutMs / 1000}s)");
-            if (!string.IsNullOrEmpty(result.StandardError))
-                throw new InvalidOperationException(result.StandardError);
-            return result.StandardOutput;
+            return await backendTasks.RunForResultAsync(
+                BackendCommand.Create(taskName, args, timeoutMs));
         }
 
         private static string FormatBackendArgsForDisplay(List<string> args)
         {
-            var sensitiveOptions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-            {
-                "--at", "--access-token", "--refresh-token", "--api-key", "--api-token",
-                "--admin-token", "--client-secret", "--password", "--service-token",
-                "--proxy", "--proxy-pool", "--checkout-proxy", "--provider-proxy", "--approve-proxy",
-                "--promotion-proxy", "--stripe-init-proxy", "--payment-method-proxy",
-                "--confirm-proxy", "--redirect-proxy", "--blik-code", "--mailbox-line",
-                "--phone-pool-file",
-            };
-            var output = new List<string>();
-            for (int index = 0; index < (args?.Count ?? 0); index++)
-            {
-                string value = args[index] ?? "";
-                int equals = value.IndexOf('=');
-                string option = equals > 0 ? value.Substring(0, equals) : value;
-                if (sensitiveOptions.Contains(option))
-                {
-                    output.Add(equals > 0 ? option + "=***" : option);
-                    if (equals < 0 && index + 1 < args.Count)
-                    {
-                        output.Add("***");
-                        index++;
-                    }
-                    continue;
-                }
-                output.Add(value);
-            }
-            return string.Join(" ", output);
+            return SensitiveDataSanitizer.RedactArguments(args);
+        }
+
+        private void RefreshPoolsAfterHotPersistence(string line)
+        {
+            if (string.IsNullOrWhiteSpace(line)
+                || !line.Contains("Saved session:", StringComparison.OrdinalIgnoreCase))
+                return;
+
+            DateTime now = DateTime.UtcNow;
+            if ((now - lastHotPersistenceRefreshUtc).TotalMilliseconds < 750)
+                return;
+            lastHotPersistenceRefreshUtc = now;
+            RefreshPools();
         }
 
         private void TaskGrid_Loaded(object sender, RoutedEventArgs e) => ScrollTaskGridToBottom();
@@ -210,20 +311,57 @@ namespace SmsWorkbench
             }), DispatcherPriority.Background);
         }
 
-        private async void DeleteSelected_Click(object sender, RoutedEventArgs e)
+        private void DeleteSelected_Click(object sender, RoutedEventArgs e)
+            => RunUiTask(DeleteSelectedAsync);
+
+        private async Task DeleteSelectedAsync()
         {
             var selected = SelectedEmailRowsOrNotify("删除");
             if (selected.Count == 0) return;
             if (!await ShowDeleteConfirmDialog(selected.Count)) return;
-            int failed = selected.Count(row => !DeleteRow(row));
-            RefreshPools();
-            if (failed > 0)
+            BackendCommandPlan plan = null;
+            try
             {
-                await DialogFactory.ShowInfoAsync(
-                    this,
-                    "删除未完成",
-                    failed + " 条记录未能完整删除。请查看运行日志。");
+                plan = BackendCommandPlanner.CreateBatchDeleteAccounts(
+                    selected.Select(row => NormalizeEmailKey(row.Identifier)).ToArray(),
+                    workers: Math.Min(8, Math.Max(1, selected.Count)));
+                BackendCommandResult backend = await backendTasks.RunAsync(
+                    BackendCommand.Create(plan.TaskName, plan.Arguments.ToList(), plan.TimeoutMilliseconds ?? 120000));
+                int failed = CountBatchDeleteFailures(backend, selected.Count);
+                if (failed > 0)
+                {
+                    await DialogFactory.ShowInfoAsync(
+                        this,
+                        "删除未完成",
+                        failed + " 条记录未能完整删除。请查看运行日志。");
+                }
             }
+            catch (Exception ex)
+            {
+                Log("批量删除失败：" + SensitiveDataSanitizer.Redact(ex.Message));
+                await DialogFactory.ShowInfoAsync(this, "删除失败", "批量删除未完成，请查看运行日志。");
+            }
+            finally
+            {
+                if (plan != null)
+                {
+                    foreach (string path in plan.TempFiles)
+                        TryDeleteFile(path);
+                }
+                RefreshPools();
+            }
+        }
+
+        private static int CountBatchDeleteFailures(BackendCommandResult backend, int expected)
+        {
+            if (backend.ExitCode != 0 || !backend.Payload.HasValue)
+                return expected;
+            JsonElement payload = backend.Payload.Value;
+            if (payload.TryGetProperty("failed", out JsonElement failed) && failed.ValueKind == JsonValueKind.Number)
+                return Math.Max(0, failed.GetInt32());
+            return payload.TryGetProperty("ok", out JsonElement ok) && ok.ValueKind == JsonValueKind.True
+                ? 0
+                : expected;
         }
 
         private async Task<bool> ShowDeleteConfirmDialog(int count)
@@ -236,129 +374,6 @@ namespace SmsWorkbench
                 isDanger: true);
         }
 
-        private bool DeleteRow(PoolRow row)
-        {
-            try
-            {
-                string emailKey = NormalizeEmailKey(row.Identifier);
-                int removedPoolLines = DeleteMailboxLines(row, emailKey);
-                int removedSqliteRows = DeleteSqliteAccountRows(row, emailKey);
-                int removedSessionFiles = DeleteSessionJsonFiles(row, emailKey);
-
-                if (row.SourcePath.EndsWith(".json", StringComparison.OrdinalIgnoreCase)
-                    && File.Exists(row.SourcePath)
-                    && IsUnderDirectory(row.SourcePath, GetSessionsDir()))
-                {
-                    File.Delete(row.SourcePath);
-                    removedSessionFiles++;
-                }
-
-                Log("删除账号：" + row.Identifier
-                    + "，邮箱池 " + removedPoolLines
-                    + " 条，SQLite " + removedSqliteRows
-                    + " 条，session " + removedSessionFiles + " 个");
-                return true;
-            }
-            catch (Exception ex)
-            {
-                Log("删除失败：" + row.Identifier + " " + ex.Message);
-                return false;
-            }
-        }
-
-        private bool DeletionEmailMatch(string candidate, string emailKey)
-        {
-            if (emailKey.Length == 0) return false;
-            string normalizedCandidate = NormalizeEmailKey(candidate);
-            return normalizedCandidate.Length > 0 && normalizedCandidate == emailKey;
-        }
-
-        private int DeleteMailboxLines(PoolRow row, string emailKey)
-        {
-            int removed = 0;
-            var paths = GetKnownMailboxPoolFiles().ToList();
-            if (!string.IsNullOrWhiteSpace(row.SourcePath)
-                && row.SourcePath.EndsWith(".txt", StringComparison.OrdinalIgnoreCase)
-                && File.Exists(row.SourcePath))
-            {
-                paths.Insert(0, row.SourcePath);
-            }
-            var exactLines = new[] { row.RawLine, row.MailboxLine };
-            foreach (string path in paths.Where(p => !string.IsNullOrWhiteSpace(p)).Distinct(StringComparer.OrdinalIgnoreCase))
-            {
-                removed += MailboxPoolFileStore.DeleteMatchingLines(path, emailKey, exactLines);
-            }
-            return removed;
-        }
-
-        private int DeleteSqliteAccountRows(PoolRow row, string emailKey)
-        {
-            string dbPath = row.SourcePath.EndsWith(".sqlite3", StringComparison.OrdinalIgnoreCase)
-                ? row.SourcePath
-                : GetDatabasePath();
-            if (!File.Exists(dbPath)) return 0;
-
-            var rows = SqliteNative.Query(dbPath, "SELECT id,email,json_path FROM accounts");
-            var deleteIds = new List<string>();
-            string explicitId = row.SourcePath.EndsWith(".sqlite3", StringComparison.OrdinalIgnoreCase) ? OnlyDigits(row.RawLine) : "";
-            foreach (Dictionary<string, string> data in rows)
-            {
-                string id = data.TryGetValue("id", out string rawId) ? rawId : "";
-                string email = data.TryGetValue("email", out string rawEmail) ? rawEmail : "";
-                bool matches = explicitId.Length > 0 && id == explicitId;
-                matches = matches || DeletionEmailMatch(email, emailKey);
-                if (!matches) continue;
-                deleteIds.Add(id);
-
-                string jsonPath = data.TryGetValue("json_path", out string rawJsonPath) ? rawJsonPath : "";
-                if (File.Exists(jsonPath) && IsUnderDirectory(jsonPath, GetSessionsDir()))
-                {
-                    TryDeleteFile(jsonPath);
-                }
-            }
-
-            foreach (string id in deleteIds.Distinct())
-            {
-                SqliteNative.Execute(dbPath, "DELETE FROM accounts WHERE id=" + OnlyDigits(id));
-            }
-            return deleteIds.Distinct().Count();
-        }
-
-        private int DeleteSessionJsonFiles(PoolRow row, string emailKey)
-        {
-            int removed = 0;
-            var dirs = new List<string> { GetSessionsDir(), rootDir };
-            foreach (string dir in dirs.Where(Directory.Exists).Distinct(StringComparer.OrdinalIgnoreCase))
-            {
-                foreach (string path in Directory.GetFiles(dir, "session_*.json", SearchOption.TopDirectoryOnly))
-                {
-                    if (!SessionJsonMatchesEmail(path, emailKey)) continue;
-                    if (TryDeleteFile(path)) removed++;
-                }
-            }
-            string notes = (row.Notes ?? "").Trim();
-            if (File.Exists(notes) && notes.EndsWith(".json", StringComparison.OrdinalIgnoreCase)
-                && IsUnderDirectory(notes, GetSessionsDir()) && TryDeleteFile(notes))
-            {
-                removed++;
-            }
-            return removed;
-        }
-
-        private bool SessionJsonMatchesEmail(string path, string emailKey)
-        {
-            if (emailKey.Length == 0) return false;
-            try
-            {
-                Dictionary<string, object> data = ReadJsonObject(path);
-                return DeletionEmailMatch(GetString(data, "email"), emailKey);
-            }
-            catch
-            {
-                return false;
-            }
-        }
-
         private bool TryDeleteFile(string path)
         {
             try
@@ -369,22 +384,22 @@ namespace SmsWorkbench
             }
             catch (Exception ex)
             {
-                Log("删除文件失败：" + path + " " + ex.Message);
+                Log("删除文件失败：" + SensitiveDataSanitizer.Redact(path) + " " + SensitiveDataSanitizer.Redact(ex.Message));
                 return false;
             }
         }
 
         private void CancelBatch_Click(object sender, RoutedEventArgs e)
         {
-            if (runningBackendCancellation == null)
+            if (!backendTasks.IsRunning)
             {
                 Log("当前没有运行中的批次。");
                 return;
             }
             try
             {
-                runningBackendCancellation.Cancel();
-                Log("已取消当前批次。");
+                if (backendTasks.Cancel())
+                    Log("已取消当前批次。");
             }
             catch (Exception ex)
             {

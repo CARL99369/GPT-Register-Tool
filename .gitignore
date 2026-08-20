@@ -37,6 +37,14 @@ tests/**/obj/
 .vs/
 .idea/
 .vscode/
+.workbuddy-ai/
+/.zcode/
+/gates/
+TestResults/
+*.trx
+.coverage
+coverage.xml
+htmlcov/
 scripts/installer/bin/
 scripts/installer/obj/
 scripts/installer/payload.zip

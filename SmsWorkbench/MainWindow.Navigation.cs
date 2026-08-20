@@ -14,14 +14,23 @@ namespace SmsWorkbench
 
         private void AddSessionFileArg(List<string> args, PoolRow row)
         {
-            string jsonPath = File.Exists(row.Notes) && row.Notes.EndsWith(".json", StringComparison.OrdinalIgnoreCase)
-                ? row.Notes
-                : row.SourcePath;
-            if (File.Exists(jsonPath) && jsonPath.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+            string jsonPath = SessionFileFor(row);
+            if (jsonPath.Length > 0)
             {
                 args.Add("--session-file");
                 args.Add(jsonPath);
             }
+        }
+
+        private static string SessionFileFor(PoolRow row)
+        {
+            if (row == null) return "";
+            string jsonPath = File.Exists(row.Notes) && row.Notes.EndsWith(".json", StringComparison.OrdinalIgnoreCase)
+                ? row.Notes
+                : row.SourcePath;
+            return File.Exists(jsonPath) && jsonPath.EndsWith(".json", StringComparison.OrdinalIgnoreCase)
+                ? jsonPath
+                : "";
         }
 
         private PoolRow SelectedEmailRowOrNotify(string action)
@@ -67,6 +76,26 @@ namespace SmsWorkbench
 
         private void ApplyFilter_Click(object sender, RoutedEventArgs e)
         {
+            currentPage = 1;
+            RefreshPagedRows();
+        }
+
+        private void AccountGrid_Sorting(object sender, DataGridSortingEventArgs e)
+        {
+            string member = (e.Column.SortMemberPath ?? "").Trim();
+            if (member.Length == 0) return;
+
+            e.Handled = true;
+            ListSortDirection next = e.Column.SortDirection == ListSortDirection.Ascending
+                ? ListSortDirection.Descending
+                : ListSortDirection.Ascending;
+            foreach (DataGridColumn column in AccountGrid.Columns)
+            {
+                column.SortDirection = null;
+            }
+            e.Column.SortDirection = next;
+            accountSortMember = member;
+            accountSortDirection = next;
             currentPage = 1;
             RefreshPagedRows();
         }

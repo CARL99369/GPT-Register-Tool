@@ -8,20 +8,37 @@ from curl_cffi import requests as curl_requests
 from .config import CFG
 from .paths import output_dir
 from .storage import get_account_record, list_paypal_accounts, upsert_account
+from .http_utils import _minimal_chatgpt_cookie_header
 
 
-def refresh_session(email="", session_file="", timeout=300, headless=False, browser=False, proxy=None):
-    """Refresh ChatGPT session. Protocol mode is the default; browser mode is opt-in."""
+def refresh_session(
+    email="",
+    session_file="",
+    timeout=300,
+    proxy=None,
+    *,
+    persist=True,
+):
+    """Refresh a ChatGPT session through the cookie-based protocol path.
+
+    Browser-based re-login has been removed; recovery is protocol-only. Callers
+    that need a full login when the cookie is dead should use the
+    ``account_recovery`` chain (RT / cookie / protocol email-OTP / Codex OAuth).
+    """
     data, json_path = _load_seed_session(email=email, session_file=session_file)
     target_email = (email or data.get("email") or "").strip().lower()
     timeout = max(30, int(timeout or 300))
+    return _refresh_session_protocol(
+        data,
+        json_path,
+        target_email,
+        timeout,
+        proxy=proxy,
+        persist=persist,
+    )
 
-    if browser:
-        return _refresh_session_browser(data, json_path, target_email, timeout, headless)
-    return _refresh_session_protocol(data, json_path, target_email, timeout, proxy=proxy)
 
-
-def _refresh_session_protocol(data, json_path, target_email, timeout, proxy=None):
+def _refresh_session_protocol(data, json_path, target_email, timeout, proxy=None, persist=True):
     cookie_header = _minimal_chatgpt_cookie_header(data.get("cookie_header") or "")
     cookie_header = _ensure_session_cookie(cookie_header, data)
     if not _has_session_cookie(cookie_header):
@@ -41,61 +58,27 @@ def _refresh_session_protocol(data, json_path, target_email, timeout, proxy=None
         oauth_refresh_token=oauth_refresh_token,
         cookie_header=cookie_header,
     )
+    return _finish_session_refresh(refreshed, json_path, "protocol", persist)
+
+
+def _finish_session_refresh(refreshed, json_path, mode, persist):
+    if not persist:
+        return {
+            "ok": True,
+            "mode": mode,
+            "email": refreshed.get("email", ""),
+            "refresh_token_status": refreshed["refresh_token_status"],
+            "persisted": False,
+            "data": refreshed,
+        }
     json_path = _save_refreshed(refreshed, json_path)
     return {
         "ok": True,
-        "mode": "protocol",
+        "mode": mode,
         "email": refreshed.get("email", ""),
         "json_path": json_path,
         "refresh_token_status": refreshed["refresh_token_status"],
-    }
-
-
-def _refresh_session_browser(data, json_path, target_email, timeout, headless):
-    try:
-        from cloakbrowser import launch
-    except ImportError:
-        return {"ok": False, "mode": "browser", "error": "cloakbrowser_not_installed: pip install cloakbrowser"}
-
-    browser = launch(headless=bool(headless), humanize=True)
-    ctx = browser.new_context(
-        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/148.0.0.0 Safari/537.36",
-        viewport={"width": 1280, "height": 900},
-        locale="en-US",
-        timezone_id="America/New_York",
-    )
-    _import_cookie_header(ctx, data.get("cookie_header", ""))
-    try:
-        page = ctx.new_page()
-        page.goto(CFG["chatgpt"].get("chat_base_url", "https://chatgpt.com"), wait_until="domcontentloaded", timeout=120000)
-        print("[*] CloakBrowser opened. Complete any required login/payment confirmation manually.")
-        auth_session = _poll_auth_session(ctx, timeout)
-        cookies = ctx.cookies()
-    except Exception as e:
-        return {"ok": False, "email": target_email, "mode": "browser", "error": str(e)}
-    finally:
-        browser.close()
-
-    access_token = _session_token(auth_session, "accessToken", "access_token")
-    oauth_refresh_token = _session_token(auth_session, "refreshToken", "refresh_token")
-    if not access_token:
-        return {"ok": False, "email": target_email, "mode": "browser", "error": "auth_session_missing_access_token"}
-
-    refreshed = _merge_refreshed_session(
-        data=data,
-        target_email=target_email,
-        auth_session=auth_session,
-        access_token=access_token,
-        oauth_refresh_token=oauth_refresh_token,
-        cookie_header=_cookie_header(cookies),
-    )
-    json_path = _save_refreshed(refreshed, json_path)
-    return {
-        "ok": True,
-        "mode": "browser",
-        "email": refreshed.get("email", ""),
-        "json_path": json_path,
-        "refresh_token_status": refreshed["refresh_token_status"],
+        "persisted": True,
     }
 
 
@@ -126,7 +109,29 @@ def _save_refreshed(refreshed, json_path):
 def _load_seed_session(email="", session_file=""):
     if session_file:
         path = Path(session_file)
-        return _read_json(path), str(path)
+        data = _read_json(path)
+        if not isinstance(data, dict):
+            data = {}
+        # Session snapshots intentionally omit mailbox credentials.  When a
+        # caller supplies an explicit snapshot path, rehydrate the missing
+        # mailbox columns from the canonical SQLite account record so recovery
+        # can still use the configured mailbox provider.
+        lookup_email = str(data.get("email") or email or "").strip().lower()
+        if lookup_email:
+            record = get_account_record(lookup_email)
+            if record:
+                data.setdefault("email", record.get("email", lookup_email))
+                for key in (
+                    "mailbox_provider",
+                    "mailbox_source",
+                    "mailbox_token",
+                    "mailbox_refresh_token",
+                ):
+                    if not str(data.get(key) or "").strip() and str(record.get(key) or "").strip():
+                        data[key] = record[key]
+                if not str(data.get("password") or "").strip() and str(record.get("password") or "").strip():
+                    data["password"] = record["password"]
+        return data, str(path)
     if email:
         record = get_account_record(email)
         json_path = str(record.get("json_path") or "").strip()
@@ -194,25 +199,6 @@ def _fetch_protocol_auth_session(cookie_header, timeout=300, proxy=None):
     return {}
 
 
-def _minimal_chatgpt_cookie_header(cookie_header):
-    keep = {
-        "__Host-next-auth.csrf-token",
-        "__Secure-next-auth.callback-url",
-        "__Secure-next-auth.session-token",
-    }
-    output = []
-    for item in str(cookie_header or "").split(";"):
-        item = item.strip()
-        if "=" not in item:
-            continue
-        name, value = item.split("=", 1)
-        name = name.strip()
-        value = value.strip()
-        if name in keep and value:
-            output.append(f"{name}={value}")
-    return "; ".join(output)
-
-
 def _ensure_session_cookie(cookie_header, data):
     if _has_session_cookie(cookie_header):
         return cookie_header
@@ -242,19 +228,47 @@ def _read_json(path):
         return {}
 
 
-def _poll_auth_session(ctx, timeout):
+def _request_auth_session(ctx):
     chat_base = CFG["chatgpt"].get("chat_base_url", "https://chatgpt.com").rstrip("/")
+    try:
+        response = ctx.request.get(f"{chat_base}/api/auth/session", timeout=30000)
+        if response.status == 200:
+            body = response.json()
+            return body if isinstance(body, dict) else {}
+    except Exception:
+        pass
+    return {}
+
+
+def _auth_session_email(data):
+    if not isinstance(data, dict):
+        return ""
+    user = data.get("user") if isinstance(data.get("user"), dict) else {}
+    account = data.get("account") if isinstance(data.get("account"), dict) else {}
+    session = data.get("session") if isinstance(data.get("session"), dict) else {}
+    session_user = session.get("user") if isinstance(session.get("user"), dict) else {}
+    for value in (
+        user.get("email"),
+        account.get("email"),
+        session_user.get("email"),
+        data.get("email"),
+    ):
+        email = str(value or "").strip().lower()
+        if email:
+            return email
+    return ""
+
+
+def _poll_auth_session(ctx, timeout):
     deadline = time.time() + timeout
     last_status = ""
     while time.time() < deadline:
         try:
-            response = ctx.request.get(f"{chat_base}/api/auth/session", timeout=30000)
-            last_status = str(response.status)
-            if response.status == 200:
-                body = response.json()
-                if _session_token(body, "accessToken", "access_token"):
-                    print("[*] Auth session refreshed.")
-                    return body
+            body = _request_auth_session(ctx)
+            last_status = "200" if body else "unavailable"
+            if _session_token(body, "accessToken", "access_token"):
+                print("[*] Auth session refreshed.")
+                return body
         except Exception as e:
             last_status = str(e)
         print(f"[*] Waiting for auth session... {last_status}")
@@ -276,43 +290,6 @@ def _session_token(data, *keys):
             if isinstance(value, str) and value:
                 return value
     return ""
-
-
-def _import_cookie_header(ctx, cookie_header):
-    for item in str(cookie_header or "").split(";"):
-        if "=" not in item:
-            continue
-        name, value = item.split("=", 1)
-        name = name.strip()
-        value = value.strip()
-        if not name or not value:
-            continue
-        cookie = {
-            "name": name,
-            "value": value,
-            "url": "https://chatgpt.com",
-            "path": "/",
-            "httpOnly": name.startswith("__Secure-") or name.startswith("__Host-"),
-            "secure": True,
-            "sameSite": "Lax",
-        }
-        try:
-            ctx.add_cookies([cookie])
-        except Exception as e:
-            print(f"[*] Skipping stale cookie {name}: {e}")
-
-
-def _cookie_header(cookies):
-    return "; ".join(
-        f"{cookie.get('name')}={cookie.get('value')}"
-        for cookie in cookies
-        if cookie.get("name") and cookie.get("value") and _chatgpt_cookie(cookie)
-    )
-
-
-def _chatgpt_cookie(cookie):
-    domain = str(cookie.get("domain") or "")
-    return "chatgpt.com" in domain
 
 
 def _new_session_path(data):

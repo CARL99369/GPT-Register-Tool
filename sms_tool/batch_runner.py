@@ -7,20 +7,38 @@ from .paypal_proxy import infer_proxy_country
 from .phone_proxy import probe_proxy_with_scheme_detection, refresh_proxy_sid
 
 
-def select_registration_proxy_base(proxy_pool, fallback=None):
+def _registration_proxy_candidates(proxy_pool, fallback=None):
     candidates = [str(item or "").strip() for item in (proxy_pool or []) if str(item or "").strip()]
     fallback = str(fallback or "").strip()
     if fallback and fallback not in candidates:
         candidates.insert(0, fallback)
+    return list(dict.fromkeys(candidates))
+
+
+def select_registration_proxy_pool(proxy_pool, fallback=None):
+    candidates = _registration_proxy_candidates(proxy_pool, fallback)
     if len(candidates) <= 1:
-        return candidates[0] if candidates else fallback
-    for base in candidates:
+        return candidates
+
+    def check(base: str) -> bool:
         candidate = refresh_proxy_sid(base)
         expected = infer_proxy_country(candidate)
         checked = probe_proxy_with_scheme_detection(candidate, expected, use_cache=True)
-        if checked.get("ok"):
-            return base
-    return candidates[0]
+        return bool(checked.get("ok"))
+
+    # Serial probing made batch start-up delay grow linearly with pool size;
+    # probe concurrently instead. executor.map preserves candidate order and
+    # the probe cache is lock-guarded for concurrent workers.
+    with ThreadPoolExecutor(max_workers=min(8, len(candidates))) as executor:
+        outcomes = list(executor.map(check, candidates))
+    healthy = [base for base, ok in zip(candidates, outcomes) if ok]
+    return healthy or candidates
+
+
+def select_registration_proxy_base(proxy_pool, fallback=None):
+    candidates = select_registration_proxy_pool(proxy_pool, fallback)
+    return candidates[0] if candidates else str(fallback or "").strip()
+
 
 def _unique_mailboxes(mailboxes):
     if not mailboxes:
@@ -43,11 +61,14 @@ def run_batch_impl(
     mailboxes=None,
     workers=4,
     phone_pool=None,
-    codex_oauth=True,
+    codex_oauth=False,
     registration_mode=None,
     max_attempts=2,
     retry_delay_seconds=1.0,
     run_email_func=None,
+    browser_headless: bool | None = None,
+    enroll_2fa: bool = True,
+    on_result=None,
 ):
     if run_email_func is None:
         raise ValueError("run_email_func is required")
@@ -57,9 +78,8 @@ def run_batch_impl(
         proxy_pool.insert(0, str(proxy).strip())
     if not proxy_pool and proxy:
         proxy_pool = [str(proxy).strip()]
-    selected_proxy = select_registration_proxy_base(proxy_pool, proxy)
-    proxy_pool = [selected_proxy] if selected_proxy else []
-    proxy = selected_proxy or proxy
+    proxy_pool = select_registration_proxy_pool(proxy_pool, proxy)
+    proxy = proxy_pool[0] if proxy_pool else proxy
     if mailboxes and int(count or 1) > len(mailboxes):
         print(f"[!] Requested {count} account(s), but only {len(mailboxes)} unique mailbox(es) are available; capping batch size.")
         count = len(mailboxes)
@@ -105,9 +125,9 @@ def run_batch_impl(
         print(f"\n{'#' * 40}")
         print(f"  Account {i + 1}/{count}")
         print(f"{'#' * 40}")
-        base_proxy = proxy_pool[i % len(proxy_pool)] if proxy_pool else proxy
         mailbox = mailboxes[i] if mailboxes else None
         for attempt in range(1, max_attempts + 1):
+            base_proxy = proxy_pool[(i + attempt - 1) % len(proxy_pool)] if proxy_pool else proxy
             worker_proxy = (
                 first_attempt_proxies[i]
                 if attempt == 1 and i in first_attempt_proxies
@@ -122,6 +142,8 @@ def run_batch_impl(
                     codex_oauth=codex_oauth,
                     sentinel_data=sentinel_data,
                     registration_mode=registration_mode,
+                    browser_headless=browser_headless,
+                    enroll_2fa=enroll_2fa,
                 )
             except Exception as e:
                 import traceback; traceback.print_exc()
@@ -138,7 +160,7 @@ def run_batch_impl(
             if result.get("success", False):
                 return i, result
             result.setdefault("failure_class", classify_error(result))
-            if result["failure_class"] in {"network", "mailbox", "auth_state"}:
+            if result["failure_class"] in {"network", "mailbox", "auth_state", "rate_limit"}:
                 result.setdefault("dropped", False)
             elif result["failure_class"] == "account":
                 result.setdefault("dropped", True)
@@ -153,10 +175,22 @@ def run_batch_impl(
                 time.sleep(retry_delay_seconds)
         return i, result
 
+    def _notify_result(index, result):
+        if on_result is None:
+            return
+        try:
+            on_result(index, result)
+        except Exception as exc:
+            print(
+                f"[!] Result callback failed for account {index + 1}: "
+                f"{type(exc).__name__}; batch continues."
+            )
+
     if workers <= 1:
         for i in range(count):
             _, result = _run_one(i)
             results.append(result)
+            _notify_result(i, result)
         if prewarm_executor is not None:
             prewarm_executor.shutdown(wait=True)
         return results
@@ -167,6 +201,7 @@ def run_batch_impl(
         for future in as_completed(futures):
             i, result = future.result()
             ordered[i] = result
+            _notify_result(i, result)
     results.extend(result for result in ordered if result is not None)
     if prewarm_executor is not None:
         prewarm_executor.shutdown(wait=True)

@@ -3,7 +3,10 @@ namespace SmsWorkbench
     public partial class MainWindow
     {
         // Inbox view and mail detail dialog
-        private async void ShowInboxDialog(PoolRow row)
+        private void ShowInboxDialog(PoolRow row)
+            => RunUiTask(() => ShowInboxDialogAsync(row));
+
+        private async Task ShowInboxDialogAsync(PoolRow row)
         {
             var dialog = new Window
             {
@@ -76,9 +79,9 @@ namespace SmsWorkbench
 
             async Task LoadEmails()
             {
-                if (IsCfWorkerRow(row) || IsReMailRow(row))
+                if (IsCfWorkerRow(row) || IsReMailRow(row) || IsSmailrRow(row))
                 {
-                    header.Text = IsReMailRow(row) ? "正在获取 ReMail 邮件..." : "正在获取 CFWorker 邮件...";
+                    header.Text = IsReMailRow(row) ? "正在获取 ReMail 邮件..." : IsSmailrRow(row) ? "正在获取 Smailr 邮件..." : "正在获取 CFWorker 邮件...";
                     try
                     {
                         mailItems.Clear();
@@ -91,7 +94,7 @@ namespace SmsWorkbench
                     catch (Exception ex)
                     {
                         header.Text = "获取邮件失败：" + ex.Message;
-                        Log((IsReMailRow(row) ? "ReMail" : "CFWorker") + "收件箱获取失败：" + ex.Message);
+                        Log((IsReMailRow(row) ? "ReMail" : IsSmailrRow(row) ? "Smailr" : "CFWorker") + "收件箱获取失败：" + ex.Message);
                     }
                     return;
                 }
@@ -113,7 +116,7 @@ namespace SmsWorkbench
                 }
             }
 
-            refreshBtn.Click += async (_, __) => await LoadEmails();
+            refreshBtn.Click += (_, __) => RunUiTask(LoadEmails);
             mailGrid.MouseDoubleClick += (_, __) =>
             {
                 if (mailGrid.SelectedItem is MailItem item)
@@ -191,7 +194,7 @@ namespace SmsWorkbench
         private static string BackendFailureMessage(BackendCommandResult result)
         {
             string message = string.IsNullOrWhiteSpace(result.StandardError)
-                ? result.StandardOutput
+                ? SensitiveDataSanitizer.Redact(result.StandardOutput)
                 : result.StandardError;
             message = (message ?? "").Trim();
             if (message.Length > 800) message = string.Concat(message.AsSpan(0, 800), "...");
@@ -217,16 +220,12 @@ namespace SmsWorkbench
                 || row.AccountType.Contains("ReMail", StringComparison.OrdinalIgnoreCase);
         }
 
-        private string JsonStringAny(JsonElement obj, params string[] properties)
+        private bool IsSmailrRow(PoolRow row)
         {
-            if (obj.ValueKind != JsonValueKind.Object) return obj.ValueKind == JsonValueKind.String ? obj.GetString() ?? "" : "";
-            foreach (string property in properties)
-            {
-                if (!obj.TryGetProperty(property, out JsonElement value)) continue;
-                if (value.ValueKind == JsonValueKind.String) return value.GetString() ?? "";
-                if (value.ValueKind == JsonValueKind.Number) return value.ToString();
-            }
-            return "";
+            if (row == null) return false;
+            return row.MailboxProvider.Equals("smailr", StringComparison.OrdinalIgnoreCase)
+                || row.AccountType.Contains("Smailr", StringComparison.OrdinalIgnoreCase)
+                || row.RawLine.StartsWith("smailr://", StringComparison.OrdinalIgnoreCase);
         }
 
         private void ShowMailDetailDialog(MailItem item)

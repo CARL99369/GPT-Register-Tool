@@ -9,6 +9,29 @@ from sms_tool import paypal_proxy
 
 
 class PayPalProxyTests(unittest.TestCase):
+    def test_probe_detects_socks5h_when_bare_entry_defaulted_to_http(self):
+        seen = []
+
+        def fake_probe(value, expected, stage, _timeout):
+            seen.append(value)
+            return paypal_proxy.ProxyProbeResult(
+                ok=value.startswith("socks5h://"),
+                stage=stage,
+                expected_country=expected,
+                country_code=expected if value.startswith("socks5h://") else "",
+                error="proxy_probe_failed" if value.startswith("http://") else "",
+            )
+
+        with patch.object(paypal_proxy, "_probe_proxy_network", side_effect=fake_probe):
+            result = paypal_proxy.probe_proxy("proxy.example:1080:user:pass", "US")
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.scheme, "socks5h")
+        self.assertEqual(
+            [value.split("://", 1)[0] for value in seen],
+            ["http", "socks5h"],
+        )
+
     def test_proxy_probe_error_redacts_authenticated_proxy(self):
         class FailingSession:
             trust_env = True
@@ -86,6 +109,59 @@ class PayPalProxyTests(unittest.TestCase):
             self.assertNotIn("checkout-pass", raw)
             self.assertNotIn("secret-a", raw)
             self.assertNotIn("secret-b", raw)
+
+    def test_cached_country_mismatch_is_not_replayed_for_that_country(self):
+        """A mismatch recorded against another country must not fail this one.
+
+        The same proxy template is probed for different countries across
+        methods and stages. Replaying an old "expected KR, got JP" verdict for a
+        request that now expects JP would reject a working proxy.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = paypal_proxy.PayPalProxyState(Path(temp_dir) / "state.json")
+            proxy = "http://user-region-JP:secret@proxy.example:1000"
+            state.record_probe(
+                proxy,
+                paypal_proxy.ProxyProbeResult(
+                    ok=False,
+                    stage="approve",
+                    expected_country="KR",
+                    ip="1.2.3.4",
+                    country_code="JP",
+                    country="Japan",
+                    region="Tokyo",
+                    error="country_mismatch:JP",
+                ),
+            )
+
+            # The ask now matches the exit that was actually reached -> re-probe.
+            self.assertIsNone(state.cached_probe(proxy, "JP", "approve"))
+            # A different ask is still answered from cache (proxy stays skipped).
+            skipped = state.cached_probe(proxy, "KR", "approve")
+            self.assertIsNotNone(skipped)
+            self.assertFalse(skipped.ok)
+
+    def test_cached_transport_failure_still_skips_dead_proxy(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = paypal_proxy.PayPalProxyState(Path(temp_dir) / "state.json")
+            proxy = "http://user-region-JP:secret@dead.example:1000"
+            state.record_probe(
+                proxy,
+                paypal_proxy.ProxyProbeResult(
+                    ok=False,
+                    stage="approve",
+                    expected_country="JP",
+                    ip="",
+                    country_code="",
+                    country="",
+                    region="",
+                    error="proxy_probe_failed:HTTP 407",
+                ),
+            )
+
+            cached = state.cached_probe(proxy, "JP", "approve")
+            self.assertIsNotNone(cached)
+            self.assertFalse(cached.ok)
 
     def test_zero_cache_skips_known_nonzero_checkout(self):
         with tempfile.TemporaryDirectory() as temp_dir:

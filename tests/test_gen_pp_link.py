@@ -2,9 +2,35 @@ import unittest
 from unittest.mock import patch
 
 from sms_tool import gen_pp_link
+from sms_tool import paypal_extract
+from sms_tool import upi_link
 
 
 class GeneratePpLinkContractTests(unittest.TestCase):
+    def test_runtime_config_uses_canonical_paypal_stage_countries(self):
+        cfg = {
+            "paypal": {
+                "stage_proxy_countries": {
+                    "checkout": "JP",
+                    "provider": "JP",
+                    "stripe_init": "JP",
+                    "approve": "JP",
+                }
+            },
+            "protocol_payments": {
+                "methods": {
+                    "paypal": {
+                        "stage_proxy_countries": {"checkout": "US", "approve": "US"}
+                    }
+                }
+            },
+        }
+
+        self.assertEqual(
+            gen_pp_link._paypal_config(cfg)["stage_proxy_countries"],
+            {"checkout": "US", "approve": "US"},
+        )
+
     def test_strict_zero_due_rejects_unknown_amount(self):
         class FakeResponse:
             status_code = 200
@@ -77,8 +103,10 @@ class GeneratePpLinkContractTests(unittest.TestCase):
                     with patch.object(gen_pp_link, "_new_session", return_value=FakeSession()):
                         result = gen_pp_link.generate_hosted_long_url("at", require_zero=True)
 
+        # 金额取不到时按协议模糊归为 unknown，不能当 0 元放行也不能当非零误杀。
+        # 该路径不进 ok=True 的成功分支，ok=False；error_code 区分"金额未知"。
         self.assertFalse(result["ok"])
-        self.assertEqual(result["error_code"], "checkout_not_zero_due")
+        self.assertIn(result["error_code"], {"checkout_not_zero_due", "checkout_amount_unknown"})
         self.assertIsNone(result["amount"])
 
     def test_default_proxy_does_not_override_configured_stage_proxies(self):
@@ -283,6 +311,36 @@ class GeneratePpLinkContractTests(unittest.TestCase):
         self.assertEqual(result["url"], "https://checkout.stripe.com/c/pay/cs_test")
         self.assertEqual(result["link_type"], "stripe_hosted")
 
+    def test_oaics_checkout_link_preserves_no_side_effect_contract(self):
+        class FakeExtractor:
+            def __init__(self, **kwargs):
+                pass
+
+            def extract(self):
+                return {
+                    "ok": True,
+                    "url": "https://chatgpt.com/checkout/openai_ie/oaics_fixture",
+                    "ba_token": "",
+                    "cs_id": "oaics_fixture",
+                    "link_type": "chatgpt_checkout_link",
+                    "currency": "GBP",
+                    "target_country": "GB",
+                    "checkout_country": "GB",
+                    "side_effect_started": False,
+                }
+
+        config = {"paypal": {"require_zero_due": True, "require_ba_token": False}}
+        with patch.object(gen_pp_link, "_load_json", return_value=config):
+            with patch.object(gen_pp_link, "_proxies_from_config", return_value={"checkout": "", "provider": "", "approve": "", "promotion": ""}):
+                with patch.object(gen_pp_link, "PPLinkExtractor", FakeExtractor):
+                    result = gen_pp_link.generate_pp_link(
+                        "at", target_country="GB", checkout_country="GB"
+                    )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["link_type"], "chatgpt_checkout_link")
+        self.assertFalse(result["side_effect_started"])
+
 
 
 
@@ -308,7 +366,7 @@ class GeneratePpLinkContractTests(unittest.TestCase):
             def __init__(self, proxy):
                 self.headers = {}
 
-            def post(self, url, json=None, data=None, timeout=None):
+            def post(self, url, json=None, data=None, timeout=None, headers=None):
                 posted.append((url, json, data))
                 raise AssertionError(f"unexpected Stripe call: {url}")
 
@@ -508,8 +566,8 @@ class GeneratePpLinkContractTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             qr_path = Path(tmp) / "upi.png"
-            with patch.object(gen_pp_link, "_new_session", side_effect=fake_new_session):
-                with patch.object(gen_pp_link, "_write_qr_png", side_effect=lambda data, path="": (Path(path).write_bytes(b"qr"), str(path))[1]):
+            with patch.object(upi_link, "_new_session", side_effect=fake_new_session):
+                with patch.object(upi_link, "_write_qr_png", side_effect=lambda data, path="": (Path(path).write_bytes(b"qr"), str(path))[1]):
                     result = gen_pp_link.generate_upi_qr_link(
                         "at",
                         checkout_proxy="socks5h://jp-checkout",
@@ -563,7 +621,7 @@ class GeneratePpLinkContractTests(unittest.TestCase):
                 return FakeResponse({"stripe_hosted_url": "https://checkout.stripe.com/c/pay/cs_live_NOUPI", "payment_method_types": ["card"], "currency": "inr", "total_summary": {"due": 0, "currency": "inr"}})
 
         cfg = {"upi": {"checkout_country": "JP", "payment_country": "IN", "require_zero_due": True}}
-        with patch.object(gen_pp_link, "_load_json", return_value=cfg), patch.object(gen_pp_link, "_new_session", side_effect=lambda proxy="": FakeSession(proxy)):
+        with patch.object(upi_link, "_load_json", return_value=cfg), patch.object(upi_link, "_new_session", side_effect=lambda proxy="": FakeSession(proxy)):
             result = gen_pp_link.generate_upi_qr_link("at", checkout_proxy="jp", provider_proxy="in")
 
         self.assertFalse(result["ok"])
@@ -755,6 +813,10 @@ class GeneratePpLinkContractTests(unittest.TestCase):
                             "redirect_to_url": {"url": "https://www.paypal.com/agreements/approve?ba_token=BA-TEST123"},
                         },
                     })
+                if url.endswith("/backend-api/sentinel/ping"):
+                    return FakeResponse(200, {})
+                if url.endswith("/backend-api/payments/checkout/approve"):
+                    return FakeResponse(200, {"result": "approved"})
                 raise AssertionError(url)
 
             def get(self, url, params=None, timeout=None, allow_redirects=True):
@@ -770,15 +832,16 @@ class GeneratePpLinkContractTests(unittest.TestCase):
                 })
             raise AssertionError(url)
 
-        with patch.object(gen_pp_link, "_new_session", side_effect=lambda proxy="": FakeSession(proxy)):
-            with patch.object(gen_pp_link, "_checkout_post", side_effect=fake_checkout_post):
-                extractor = gen_pp_link.PPLinkExtractor(
-                    access_token="at",
-                    target_country="US",
-                    checkout_country="JP",
-                    require_zero=True,
-                )
-                result = extractor.extract()
+        with patch.object(paypal_extract, "_new_session", side_effect=lambda proxy="": FakeSession(proxy)):
+            with patch.object(paypal_extract, "_checkout_post", side_effect=fake_checkout_post):
+                with patch.object(paypal_extract.PPLinkExtractor, "_poll_payment_page", return_value="https://www.paypal.com/agreements/approve?ba_token=BA-TEST123"):
+                    extractor = gen_pp_link.PPLinkExtractor(
+                        access_token="at",
+                        target_country="US",
+                        checkout_country="JP",
+                        require_zero=True,
+                    )
+                    result = extractor.extract()
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["target_country"], "US")

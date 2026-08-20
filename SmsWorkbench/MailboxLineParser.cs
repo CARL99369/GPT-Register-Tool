@@ -35,7 +35,14 @@ namespace SmsWorkbench
                     && uri.Host.Length > 0
                     && (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps))
                 {
-                    info = new MailboxLineInfo(email, "url_html", "--chatai-mailbox-file", value);
+                    bool isICloud = email.EndsWith("@icloud.com", StringComparison.OrdinalIgnoreCase)
+                        || email.EndsWith("@me.com", StringComparison.OrdinalIgnoreCase)
+                        || email.EndsWith("@mac.com", StringComparison.OrdinalIgnoreCase);
+                    info = new MailboxLineInfo(
+                        email,
+                        isICloud ? "icloud_url" : "url_html",
+                        isICloud ? "--mailbox-file" : "--chatai-mailbox-file",
+                        value);
                     return true;
                 }
             }

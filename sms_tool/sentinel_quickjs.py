@@ -37,6 +37,9 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from .auth_headers import auth_impersonate
+from .http_client import request_with_retry
+
 logger = logging.getLogger(__name__)
 
 
@@ -76,8 +79,11 @@ def _ensure_sdk_file(session: Any, timeout_ms: int) -> Path:
     if sdk_file.exists() and sdk_file.stat().st_size > 0:
         return sdk_file
 
-    resp = session.get(
+    resp = request_with_retry(
+        session,
+        "get",
         f"https://sentinel.openai.com/sentinel/{version}/sdk.js",
+        label="sentinel-sdk",
         headers={
             "accept": "*/*",
             "accept-language": "zh-CN,zh;q=0.9",
@@ -87,6 +93,7 @@ def _ensure_sdk_file(session: Any, timeout_ms: int) -> Path:
             "sec-fetch-site": "same-site",
         },
         timeout=max(10, int(timeout_ms / 1000)),
+        impersonate=auth_impersonate(),
     )
     status = getattr(resp, "status_code", 0)
     if status != 200:
@@ -116,6 +123,7 @@ process.stdin.on('data', (chunk) => { input += chunk; });
 process.stdin.on('end', async () => {
   try {
     const payload = JSON.parse(input || '{}');
+    if (payload.timezone_name) process.env.TZ = String(payload.timezone_name);
     globalThis.__payload_json = JSON.stringify(payload);
     globalThis.__sdk_source = fs.readFileSync(sdkFile, 'utf8');
     globalThis.__vm_done = false;
@@ -189,8 +197,11 @@ def _fetch_sentinel_challenge(
     timeout_ms: int,
 ) -> dict:
     body = {"p": request_p, "id": device_id, "flow": flow}
-    resp = session.post(
+    resp = request_with_retry(
+        session,
+        "post",
         SENTINEL_REQ_URL,
+        label="sentinel-req",
         data=json.dumps(body, separators=(",", ":")),
         headers={
             "origin": "https://sentinel.openai.com",
@@ -204,6 +215,7 @@ def _fetch_sentinel_challenge(
             "sec-fetch-site": "same-origin",
         },
         timeout=max(10, int(timeout_ms / 1000)),
+        impersonate=auth_impersonate(),
     )
     if getattr(resp, "status_code", 0) != 200:
         raise RuntimeError(f"/sentinel/req HTTP {resp.status_code}")
@@ -220,6 +232,26 @@ def get_sentinel_token_via_quickjs(
     flow: str = "authorize_continue",
     timeout_ms: int = 45000,
     log: Optional[Callable[[str], None]] = None,
+    user_agent: str = "",
+    screen: str = "",
+    lang: str = "",
+    lang_full: str = "",
+    browser_type: str = "",
+    navigator_platform: str = "Win32",
+    navigator_vendor: str = "Google Inc.",
+    hardware_concurrency: int = 8,
+    device_memory: int | None = 8,
+    max_touch_points: int = 0,
+    device_pixel_ratio: float = 1.0,
+    timezone: str = "UTC",
+    js_heap_size_limit: int = 4395630592,
+    time_origin: int = 1710000000000,
+    performance_now: float = 12345.67,
+    sec_ch_ua_full_version_list: str = "",
+    sec_ch_ua_arch: str = "",
+    sec_ch_ua_bitness: str = "",
+    sec_ch_ua_model: str = "",
+    sec_ch_ua_platform_version: str = "",
 ) -> Optional[str]:
     """Try the QuickJS path. Return JSON string on success, None on any failure.
 
@@ -235,11 +267,46 @@ def get_sentinel_token_via_quickjs(
     try:
         sdk_file = _ensure_sdk_file(session, timeout_ms)
 
+        screen_width, screen_height = "1920", "1080"
+        if "x" in str(screen):
+            screen_width, screen_height = str(screen).split("x", 1)
+        language = str(lang or "en-US")
+        languages = [language]
+        for item in str(lang_full or "").split(","):
+            value = item.split(";", 1)[0].strip()
+            if value and value not in languages:
+                languages.append(value)
+        fingerprint_payload = {
+            "device_id": did,
+            "user_agent": str(user_agent or "Mozilla/5.0"),
+            "screen_width": screen_width,
+            "screen_height": screen_height,
+            "language": language,
+            "languages": languages,
+            "browser_type": str(browser_type or ""),
+            "chrome_version": str(user_agent or "").split("Chrome/")[-1].split(".")[0] if "Chrome/" in str(user_agent or "") else "146",
+            "platform": str(navigator_platform or "Win32"),
+            "vendor": str(navigator_vendor or "Google Inc."),
+            "hardware_concurrency": int(hardware_concurrency or 8),
+            "device_memory": int(device_memory) if device_memory is not None else None,
+            "max_touch_points": int(max_touch_points or 0),
+            "device_pixel_ratio": float(device_pixel_ratio or 1.0),
+            "timezone": str(timezone or "UTC"),
+            "timezone_name": str(timezone or "UTC"),
+            "js_heap_size_limit": int(js_heap_size_limit or 4395630592),
+            "time_origin": int(time_origin or 1710000000000),
+            "performance_now": float(performance_now or 12345.67),
+            "sec_ch_ua_full_version_list": str(sec_ch_ua_full_version_list or ""),
+            "sec_ch_ua_arch": str(sec_ch_ua_arch or ""),
+            "sec_ch_ua_bitness": str(sec_ch_ua_bitness or ""),
+            "sec_ch_ua_model": str(sec_ch_ua_model or ""),
+            "sec_ch_ua_platform_version": str(sec_ch_ua_platform_version or ""),
+        }
         requirements = _run_quickjs_action(
             action="requirements",
             sdk_file=sdk_file,
             quickjs_script=quickjs_script,
-            payload={"device_id": did},
+            payload=fingerprint_payload,
             timeout_ms=timeout_ms,
         )
         request_p = str(requirements.get("request_p") or "").strip()
@@ -260,7 +327,7 @@ def get_sentinel_token_via_quickjs(
             sdk_file=sdk_file,
             quickjs_script=quickjs_script,
             payload={
-                "device_id": did,
+                **fingerprint_payload,
                 "request_p": request_p,
                 "challenge": challenge,
             },

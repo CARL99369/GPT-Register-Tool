@@ -1,5 +1,6 @@
 ﻿import base64
 import argparse
+from functools import lru_cache
 import hashlib
 import json
 import secrets
@@ -14,6 +15,7 @@ from .codex_phone import complete_phone_verification
 from .codex_sentinel import attach_sentinel, import_cached_auth_cookies, import_cookie_header, load_cached_sentinel, with_sentinel
 from .auth_headers import auth_impersonate, openai_auth_headers_lower, select_auth_fingerprint
 from .http_client import request_with_retry
+from .http_utils import _absolute_url
 from .mailbox import MailboxAccount, MailboxTokenExpiredError, _poll_email_otp, mailbox_has_inbox_credentials
 from . import mailbox_gmail
 from .commands.helpers import public_oauth_result
@@ -79,6 +81,7 @@ def collect_codex_oauth_tokens(
     force_email_otp_login=False,
     phone_pool=None,
     phone_probe_only=False,
+    browser_headless: bool | None = None,
 ):
     select_auth_fingerprint(rotate=True)
     email = str(data.get("email") or "").strip().lower()
@@ -120,6 +123,7 @@ def collect_codex_oauth_tokens(
             force_email_otp_login=force_email_otp_login,
             phone_pool=phone_pool,
             phone_probe_only=phone_probe_only,
+            browser_headless=browser_headless,
         )
         if not result.get("ok"):
             return result
@@ -161,6 +165,7 @@ def _login_and_exchange(
     force_email_otp_login=False,
     phone_pool=None,
     phone_probe_only=False,
+    browser_headless: bool | None = None,
 ):
     max_restarts = _authorize_continue_max_restarts()
     for restart_attempt in range(max_restarts + 1):
@@ -247,6 +252,7 @@ def _login_and_exchange(
                 phone_probe_only=phone_probe_only,
                 initial_otp_requested=True,
                 otp_issued_after_unix=otp_issued_after_unix,
+                browser_headless=browser_headless,
             )
             if not result.get("needs_session_restart") or restart_attempt >= max_restarts:
                 return result
@@ -283,6 +289,7 @@ def _run_protocol_login_stages(
     phone_probe_only=False,
     initial_otp_requested=False,
     otp_issued_after_unix=None,
+    browser_headless: bool | None = None,
 ):
     stage = _detect_protocol_stage(current_url)
     data.setdefault("codex_oauth_protocol", {})
@@ -320,6 +327,7 @@ def _run_protocol_login_stages(
             phone_probe_only=phone_probe_only,
             initial_otp_requested=initial_otp_requested,
             otp_issued_after_unix=otp_issued_after_unix,
+            browser_headless=browser_headless,
         )
         if email_otp_result.get("ok"):
             email_otp_result.setdefault("protocol_stage", "email_otp")
@@ -338,6 +346,7 @@ def _run_protocol_login_stages(
             timeout=timeout,
             phone_pool=phone_pool,
             phone_probe_only=phone_probe_only,
+            browser_headless=browser_headless,
         )
         if password_result.get("ok"):
             password_result.setdefault("protocol_stage", "password")
@@ -355,6 +364,7 @@ def _run_protocol_login_stages(
             reason="password_login_failed",
             phone_pool=phone_pool,
             phone_probe_only=phone_probe_only,
+            browser_headless=browser_headless,
         )
         if email_otp_result.get("ok"):
             email_otp_result.setdefault("protocol_stage", "email_otp")
@@ -426,6 +436,7 @@ def _passwordless_login_and_exchange(
     phone_probe_only=False,
     initial_otp_requested=False,
     otp_issued_after_unix=None,
+    browser_headless: bool | None = None,
 ):
     mailbox = _mailbox_from_data(data)
     if mailbox is None:
@@ -437,17 +448,18 @@ def _passwordless_login_and_exchange(
             "last_url": _safe_url(current_url),
         }
 
-    prime_result = _prime_email_verification_page(session, did, current_url)
-    if not prime_result.get("ok"):
-        return {
-            "ok": False,
-            "mode": "codex_oauth_pkce",
-            "error": "email_verification_page_failed",
-            "fallback_from": reason,
-            "last_url": _safe_url(prime_result.get("url") or current_url),
-            "body": prime_result.get("error") or "",
-            "needs_session_restart": True,
-        }
+    if initial_otp_requested:
+        prime_result = _prime_email_verification_page(session, did, current_url)
+        if not prime_result.get("ok"):
+            return {
+                "ok": False,
+                "mode": "codex_oauth_pkce",
+                "error": "email_verification_page_failed",
+                "fallback_from": reason,
+                "last_url": _safe_url(prime_result.get("url") or current_url),
+                "body": prime_result.get("error") or "",
+                "needs_session_restart": True,
+            }
 
     issued_after = int(otp_issued_after_unix or time.time())
     pending_send = False
@@ -506,6 +518,14 @@ def _passwordless_login_and_exchange(
     else:
         total_poll_timeout = min(requested_poll_timeout, 300)
     attempt_poll_timeout = max(1, total_poll_timeout // attempts)
+    excluded_otps = {
+        str(value or "").strip()
+        for value in (
+            data.get("registration_email_otp"),
+            *((data.get("excluded_email_otps") or ()) if isinstance(data.get("excluded_email_otps"), (list, tuple, set)) else ()),
+        )
+        if str(value or "").strip()
+    }
     last_error = ""
     last_validate_body = ""
     for attempt in range(attempts):
@@ -524,6 +544,7 @@ def _passwordless_login_and_exchange(
                 timeout=attempt_poll_timeout,
                 issued_after_unix=issued_after,
                 proxy=proxy,
+                excluded_otps=excluded_otps,
             )
         except MailboxTokenExpiredError:
             return {
@@ -549,6 +570,7 @@ def _passwordless_login_and_exchange(
             impersonate=auth_impersonate(),
         )
         if validate.status_code != 200:
+            excluded_otps.add(str(code))
             last_error = f"email_otp_validate_failed:{validate.status_code}"
             last_validate_body = validate.text[:300]
             print(f"[*] Email OTP validate failed: {validate.status_code} {last_validate_body}")
@@ -621,7 +643,18 @@ def _passwordless_login_and_exchange(
     }
 
 
-def _password_login_and_exchange(session, oauth, data, did, current_url, proxy=None, timeout=180, phone_pool=None, phone_probe_only=False):
+def _password_login_and_exchange(
+    session,
+    oauth,
+    data,
+    did,
+    current_url,
+    proxy=None,
+    timeout=180,
+    phone_pool=None,
+    phone_probe_only=False,
+    browser_headless: bool | None = None,
+):
     password = _account_password_from_data(data)
     if not password:
         return {
@@ -1294,8 +1327,13 @@ def _follow_redirects(session, start_url, proxy=None, max_redirects=18):
 def _mailbox_from_data(data):
     mailbox = data.get("mailbox") if isinstance(data.get("mailbox"), dict) else {}
     email = str(mailbox.get("email") or data.get("email") or "").strip()
-    refresh_token = str(mailbox.get("refresh_token") or "").strip()
-    provider = str(mailbox.get("provider") or "").strip()
+    # SQLite account rows flatten sensitive mailbox fields while token-free
+    # session snapshots retain only the public mailbox metadata. Rehydrate
+    # from either shape so recovery does not report a false missing_mailbox.
+    refresh_token = str(mailbox.get("refresh_token") or data.get("mailbox_refresh_token") or "").strip()
+    provider = str(mailbox.get("provider") or data.get("mailbox_provider") or "").strip()
+    source = str(mailbox.get("source") or data.get("mailbox_source") or "").strip()
+    mailbox_token = str(mailbox.get("token") or data.get("mailbox_token") or "").strip()
     if not email:
         return None
     mailbox_password = mailbox.get("password") if "password" in mailbox else data.get("password")
@@ -1306,11 +1344,11 @@ def _mailbox_from_data(data):
         totp_secret=str(mailbox.get("totp_secret") or "").strip(),
         refresh_token=refresh_token,
         access_token=str(mailbox.get("access_token") or "").strip(),
-        token=str(mailbox.get("token") or "").strip(),
+        token=mailbox_token,
         client_secret=str(mailbox.get("client_secret") or "").strip(),
         auth_mode=str(mailbox.get("auth_mode") or "").strip(),
         sender_name=str(mailbox.get("sender_name") or "").strip(),
-        source=str(mailbox.get("source") or "").strip(),
+        source=source,
         provider=provider,
         order_no=str(mailbox.get("order_no") or "").strip(),
         purchase_id=str(mailbox.get("purchase_id") or "").strip(),
@@ -1321,6 +1359,19 @@ def _mailbox_from_data(data):
         inbox_url=str(mailbox.get("inbox_url") or "").strip(),
     )
     if not mailbox_has_inbox_credentials(result):
+        # Safe account snapshots intentionally omit iCloud OTP URLs.  Resolve
+        # those credentials from the configured mailbox pool at use time rather
+        # than persisting the URL in SQLite/session JSON or exposing it in a
+        # recovery result.
+        if provider == "icloud_url" or source.lower() in {
+            "icloud_url",
+            "icloud",
+            "token_file",
+            "mailbox_file",
+        }:
+            fallback = _mailbox_from_configured_pool(email)
+            if fallback is not None and mailbox_has_inbox_credentials(fallback):
+                return fallback
         if mailbox_gmail.is_gmail_mailbox(result):
             from .mailbox import _mailbox_from_config
 
@@ -1329,6 +1380,31 @@ def _mailbox_from_data(data):
                 return fallback
         return None
     return result
+
+
+def _mailbox_from_configured_pool(email):
+    """Return a matching configured mailbox without copying credentials into data."""
+    normalized = str(email or "").strip().lower()
+    if not normalized:
+        return None
+    return _configured_mailbox_index().get(normalized)
+
+
+@lru_cache(maxsize=1)
+def _configured_mailbox_index():
+    """Load the configured mailbox pool once per recovery process."""
+    try:
+        from .mailbox import _load_mailbox_pool
+
+        return {
+            str(getattr(candidate, "email", "") or "").strip().lower(): candidate
+            for candidate in _load_mailbox_pool()
+            if str(getattr(candidate, "email", "") or "").strip()
+        }
+    except Exception:
+        # Recovery will report the ordinary missing-mailbox error; never leak
+        # a token-file or provider transport exception from this lookup.
+        return {}
 
 
 def _is_terminal_account_data(data):
@@ -1534,14 +1610,6 @@ def _jwt_segment(segment):
         return json.loads(base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
     except Exception:
         return {}
-
-
-def _absolute_url(base_url, url):
-    if not url:
-        return ""
-    if str(url).startswith(("http://", "https://")):
-        return str(url)
-    return base_url.rstrip("/") + "/" + str(url).lstrip("/")
 
 
 def _safe_url(url):

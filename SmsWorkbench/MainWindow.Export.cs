@@ -2,7 +2,12 @@ namespace SmsWorkbench
 {
     public partial class MainWindow
     {
-        // Account import/export, scan result and export JSON helpers
+        // Account import/export, scan result and export JSON helpers.
+        //
+        // CLI argument construction is delegated to BackendCommandPlanner;
+        // backend JSON business interpretation is delegated to
+        // BackendResultInterpreter.
+
         private void ImportPaidCpa_Click(object sender, RoutedEventArgs e)
         {
             string target = ShowImportTargetDialog("一键导入");
@@ -28,11 +33,10 @@ namespace SmsWorkbench
                 return;
             }
 
-            string emailFile = Path.Combine(Path.GetTempPath(), "oneclick_import_emails_" + DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".txt");
-            File.WriteAllLines(emailFile, rows.Select(r => r.Identifier.Trim()), new UTF8Encoding(false));
-            var args = new List<string> { "--import-cpa", "--email-file", emailFile, "--workers", "4", "--refresh-timeout", "60" };
-            AddImportTargetArg(args, target);
-            RunBackend("一键导入" + ImportTargetLabel(target) + " (" + rows.Count + ")", args);
+            var plan = BackendCommandPlanner.CreateAccountImport(
+                target,
+                rows.Select(r => r.Identifier.Trim()).ToList());
+            RunBackend(plan.TaskName, plan.Arguments.ToList());
         }
 
         private void ExportAccounts_Click(object sender, RoutedEventArgs e)
@@ -188,8 +192,12 @@ namespace SmsWorkbench
         }
 
         private void ExportAccountsJson(List<PoolRow> rows)
+            => RunUiTask(() => ExportAccountsJsonAsync(rows));
+
+        private async Task ExportAccountsJsonAsync(List<PoolRow> rows)
         {
-            if (!TryCollectAccountExportJson(rows, out List<Dictionary<string, object>> items, out int skipped))
+            var collected = await CollectAccountExportJsonAsync(rows);
+            if (collected.Items.Count == 0)
             {
                 ShowThemedInfoDialog("一键导出", "没有找到可导出的 JSON 账号记录。需要账号已生成 session/auth_session 或 SQLite 原始记录。");
                 return;
@@ -198,21 +206,24 @@ namespace SmsWorkbench
             string outputDir = Path.Combine(rootDir, "runtime", "account_json");
             Directory.CreateDirectory(outputDir);
             string outputPath = Path.Combine(outputDir, "account-" + DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".json");
-            object payload = items.Count == 1 ? items[0] : items;
+            object payload = collected.Items.Count == 1 ? collected.Items[0] : collected.Items;
             var options = new JsonSerializerOptions { WriteIndented = true };
-            File.WriteAllText(outputPath, JsonSerializer.Serialize(payload, options), new UTF8Encoding(false));
-            Log("One-click JSON export wrote " + items.Count + " account(s), skipped " + skipped + ": " + outputPath);
-            ShowExportCompleteDialog(outputPath, items.Count, skipped, "JSON", "原始账号 session JSON；保留 RT 字段，未获取 RT 的账号默认留空");
+            await Task.Run(() => File.WriteAllText(outputPath, JsonSerializer.Serialize(payload, options), new UTF8Encoding(false)));
+            Log("One-click JSON export wrote " + collected.Items.Count + " account(s), skipped " + collected.Skipped + ": " + outputPath);
+            ShowExportCompleteDialog(outputPath, collected.Items.Count, collected.Skipped, "JSON", "原始账号 session JSON；保留 RT 字段，未获取 RT 的账号默认留空");
         }
 
-        private bool TryCollectAccountExportJson(List<PoolRow> rows, out List<Dictionary<string, object>> items, out int skipped)
+        private sealed record CollectedAccountExport(List<Dictionary<string, object>> Items, int Skipped);
+
+        private async Task<CollectedAccountExport> CollectAccountExportJsonAsync(List<PoolRow> rows)
         {
-            items = new List<Dictionary<string, object>>();
+            var items = new List<Dictionary<string, object>>();
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            skipped = 0;
+            int skipped = 0;
             foreach (PoolRow row in rows)
             {
-                if (TryBuildAccountExportJson(row, out Dictionary<string, object> item))
+                Dictionary<string, object> item = await BuildAccountExportJsonAsync(row);
+                if (item != null)
                 {
                     string key = JsonExportDedupKey(item, row);
                     if (seen.Add(key))
@@ -225,16 +236,22 @@ namespace SmsWorkbench
                     skipped++;
                 }
             }
-            return items.Count > 0;
+            return new CollectedAccountExport(items, skipped);
         }
 
         private void ExportAccountsConvertedJson(List<PoolRow> rows, string format)
+            => RunUiTask(() => ExportAccountsConvertedJsonAsync(rows, format));
+
+        private async Task ExportAccountsConvertedJsonAsync(List<PoolRow> rows, string format)
         {
-            if (!TryCollectAccountExportJson(rows, out List<Dictionary<string, object>> items, out int skipped))
+            var collected = await CollectAccountExportJsonAsync(rows);
+            if (collected.Items.Count == 0)
             {
                 ShowThemedInfoDialog("一键导出", "没有找到可转换的账号 session。需要账号已生成 access_token/session/auth_session 或 SQLite 原始记录。");
                 return;
             }
+            List<Dictionary<string, object>> items = collected.Items;
+            int skipped = collected.Skipped;
 
             string normalized = (format ?? "cpa").Trim().ToLowerInvariant();
             string outputDir = Path.Combine(rootDir, "runtime", "account_json");
@@ -244,16 +261,12 @@ namespace SmsWorkbench
             string outputPath = Path.Combine(outputDir, "account-" + normalized + "-" + stamp + ".json");
             object payload = items.Count == 1 ? items[0] : items;
             var options = new JsonSerializerOptions { WriteIndented = true };
-            File.WriteAllText(sourcePath, JsonSerializer.Serialize(payload, options), new UTF8Encoding(false));
+            await Task.Run(() => File.WriteAllText(sourcePath, JsonSerializer.Serialize(payload, options), new UTF8Encoding(false)));
 
             try
             {
-                RunBackendWithResult("导出账号转换(" + normalized + ")", new List<string>
-                {
-                    "--convert-session-json", sourcePath,
-                    "--convert-format", normalized,
-                    "--convert-output", outputPath
-                });
+                var plan = BackendCommandPlanner.CreateSessionConversion(sourcePath, normalized, outputPath);
+                await RunBackendWithResultAsync(plan.TaskName, plan.Arguments.ToList());
             }
             catch (Exception ex)
             {
@@ -494,7 +507,8 @@ namespace SmsWorkbench
 
         private void ShowAccountScanResultDialog(string backendOutput)
         {
-            if (!TryExtractScanSummary(backendOutput, out Dictionary<string, object> summary))
+            var summary = BackendResultInterpreter.TryExtractScanSummary(backendOutput);
+            if (summary == null)
             {
                 ShowThemedInfoDialog("账号测活", "账号测活已结束，但未解析到结果汇总。请查看下方日志确认详情。");
                 return;
@@ -512,16 +526,16 @@ namespace SmsWorkbench
                 }
             }
 
-            bool directProbe = results.Any(r => TryGetMap(r, "probe", out Dictionary<string, object> _));
-            var rtRows = directProbe ? new List<Dictionary<string, object>>() : results.Where(r => BoolValue(r, "has_rt")).ToList();
-            var noRtRows = directProbe ? results : results.Where(r => !BoolValue(r, "has_rt")).ToList();
+            bool directProbe = results.Any(r => BackendJson.TryGetMap(r, "probe", out _));
+            var rtRows = directProbe ? new List<Dictionary<string, object>>() : results.Where(r => BackendJson.GetBool(r, "has_rt")).ToList();
+            var noRtRows = directProbe ? results : results.Where(r => !BackendJson.GetBool(r, "has_rt")).ToList();
 
             var dialog = new Window
             {
                 Title = "账号测活结果",
                 Owner = this,
-                Width = 600,
-                MinWidth = 560,
+                Width = 740,
+                MinWidth = 740,
                 SizeToContent = SizeToContent.Height,
                 MaxHeight = 760,
                 ResizeMode = ResizeMode.CanResize,
@@ -542,19 +556,16 @@ namespace SmsWorkbench
                 FontWeight = FontWeights.SemiBold,
                 Foreground = (Brush)FindResource("TextMain")
             });
-            int directOk = results.Count(AccountLivenessProbeSucceeded);
-            int direct401 = results.Count(AccountLivenessProbeReturned401);
-            int directFailed = Math.Max(0, results.Count - directOk - direct401);
             header.Children.Add(new TextBlock
             {
                 Text = directProbe
-                    ? "总数：" + results.Count + "    AT有效：" + directOk + "    AT失效：" + direct401 + "    其他失败：" + directFailed
-                    : "总数：" + GetString(summary, "total")
-                        + "    正常：" + GetString(summary, "alive")
-                        + "    掉号：" + GetString(summary, "account_deactivated")
-                        + "    401/AT失效：" + GetString(summary, "at_invalid")
-                        + "    手机验证：" + GetString(summary, "secondary_phone_verification_required")
-                        + "    失败：" + GetString(summary, "failed"),
+                    ? FormatDirectProbeSummary(results, summary)
+                    : "总数：" + BackendJson.GetString(summary, "total")
+                        + "    正常：" + BackendJson.GetString(summary, "alive")
+                        + "    掉号：" + BackendJson.GetString(summary, "account_deactivated")
+                        + "    401/AT失效：" + BackendJson.GetString(summary, "at_invalid")
+                        + "    手机验证：" + BackendJson.GetString(summary, "secondary_phone_verification_required")
+                        + "    失败：" + BackendJson.GetString(summary, "failed"),
                 Margin = new Thickness(0, 6, 0, 0),
                 Foreground = (Brush)FindResource("TextSub")
             });
@@ -604,6 +615,35 @@ namespace SmsWorkbench
             dialog.ShowDialog();
         }
 
+        private string FormatDirectProbeSummary(
+            List<Dictionary<string, object>> results,
+            Dictionary<string, object> summary)
+        {
+            results ??= new List<Dictionary<string, object>>();
+            summary ??= new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+            int directDeactivated = results.Count(BackendResultInterpreter.IsProbeDeactivated);
+            int directOk = results.Count(row =>
+                !BackendResultInterpreter.IsProbeDeactivated(row)
+                && BackendResultInterpreter.IsProbeSucceeded(row));
+            int direct401 = results.Count(row =>
+                !BackendResultInterpreter.IsProbeDeactivated(row)
+                && BackendResultInterpreter.IsProbeReturned401(row));
+            int directFailed = Math.Max(0, results.Count - directOk - direct401 - directDeactivated);
+            int.TryParse(BackendJson.GetString(summary, "relogin_attempted"), out int reloginAttempted);
+            string directSummary = "总数：" + results.Count
+                + "    AT有效：" + directOk
+                + "    AT失效：" + direct401
+                + "    账号停用：" + directDeactivated
+                + "    其他失败：" + directFailed;
+            if (reloginAttempted > 0)
+            {
+                directSummary += "    重登成功：" + BackendJson.GetString(summary, "relogin_success")
+                    + "    重登失败：" + BackendJson.GetString(summary, "relogin_failed")
+                    + "    确认停用：" + BackendJson.GetString(summary, "relogin_account_deactivated");
+            }
+            return directSummary;
+        }
+
         private void AddScanResultSection(StackPanel parent, string title, List<Dictionary<string, object>> rows)
         {
             parent.Children.Add(new TextBlock
@@ -627,18 +667,28 @@ namespace SmsWorkbench
             var stack = new StackPanel();
             foreach (Dictionary<string, object> row in rows)
             {
-                string email = GetString(row, "email");
+                string email = BackendJson.GetString(row, "email");
                 string status;
                 string error;
-                if (TryGetMap(row, "probe", out Dictionary<string, object> probe))
+                if (BackendJson.TryGetMap(row, "probe", out var probe))
                 {
-                    status = AccountLivenessProbeStatusLabel(probe);
-                    error = GetString(probe, "error");
+                    status = BackendResultInterpreter.IsProbeDeactivated(row)
+                        ? "账号停用"
+                        : BackendResultInterpreter.ProbeStatusLabel(probe);
+                    if (BackendJson.TryGetMap(row, "relogin", out var relogin)
+                        && !BackendJson.GetBool(relogin, "ok"))
+                    {
+                        error = BackendJson.GetString(relogin, "error");
+                    }
+                    else
+                    {
+                        error = BackendJson.GetString(probe, "error");
+                    }
                 }
                 else
                 {
-                    status = ScanStatusLabel(GetString(row, "scan_status"));
-                    error = ScanResultError(row);
+                    status = BackendResultInterpreter.ScanStatusLabel(BackendJson.GetString(row, "scan_status"));
+                    error = BackendResultInterpreter.ScanResultError(row);
                 }
                 string line = error.Length > 0 ? email + "  ·  " + status + "  ·  " + error : email + "  ·  " + status;
                 stack.Children.Add(new TextBlock
@@ -671,28 +721,64 @@ namespace SmsWorkbench
 
         private bool AccountLivenessProbeSucceeded(Dictionary<string, object> row)
         {
-            return TryGetMap(row, "probe", out Dictionary<string, object> probe) && BoolValue(probe, "ok");
+            return BackendJson.TryGetMap(row, "probe", out var probe) && BackendJson.GetBool(probe, "ok");
         }
 
         private bool AccountLivenessProbeReturned401(Dictionary<string, object> row)
         {
-            if (!TryGetMap(row, "probe", out Dictionary<string, object> probe)) return false;
-            string status = GetString(probe, "status").Trim().ToLowerInvariant();
-            return GetString(probe, "status_code") == "401" || status == "token_invalid";
+            if (!BackendJson.TryGetMap(row, "probe", out var probe)) return false;
+            string status = BackendJson.GetString(probe, "status").Trim().ToLowerInvariant();
+            return BackendJson.GetString(probe, "status_code") == "401" || status == "token_invalid";
+        }
+
+        private bool AccountLivenessProbeDeactivated(Dictionary<string, object> row)
+        {
+            if (row == null) return false;
+            if (AccountLivenessMapDeactivated(row)) return true;
+            if (BackendJson.TryGetMap(row, "probe", out var probe)
+                && AccountLivenessMapDeactivated(probe))
+            {
+                return true;
+            }
+            return BackendJson.TryGetMap(row, "relogin", out var relogin)
+                && AccountLivenessMapDeactivated(relogin);
+        }
+
+        private bool AccountLivenessMapDeactivated(Dictionary<string, object> data)
+        {
+            if (data == null) return false;
+            foreach (string key in new[] { "status", "quota_status", "account_scan_status", "error", "reason" })
+            {
+                string value = BackendJson.GetString(data, key).Trim();
+                if (value.Contains("account_deactivated", StringComparison.OrdinalIgnoreCase)
+                    || value.Contains("account_deatived", StringComparison.OrdinalIgnoreCase)
+                    || value.Equals("account_deleted", StringComparison.OrdinalIgnoreCase)
+                    || value.Equals("deactivated", StringComparison.OrdinalIgnoreCase)
+                    || value.Contains("account has been deactivated", StringComparison.OrdinalIgnoreCase)
+                    || value.Contains("deleted or deactivated", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+            return false;
         }
 
         private string AccountLivenessProbeStatusLabel(Dictionary<string, object> probe)
         {
-            if (GetString(probe, "status_code") == "401" || GetString(probe, "status").Equals("token_invalid", StringComparison.OrdinalIgnoreCase))
+            if (AccountLivenessMapDeactivated(probe))
+            {
+                return "账号停用";
+            }
+            if (BackendJson.GetString(probe, "status_code") == "401" || BackendJson.GetString(probe, "status").Equals("token_invalid", StringComparison.OrdinalIgnoreCase))
             {
                 return "AT失效 / HTTP 401";
             }
-            if (BoolValue(probe, "ok"))
+            if (BackendJson.GetBool(probe, "ok"))
             {
-                string statusCode = GetString(probe, "status_code");
+                string statusCode = BackendJson.GetString(probe, "status_code");
                 return statusCode.Length > 0 ? "AT有效 / HTTP " + statusCode : "AT有效";
             }
-            string failedCode = GetString(probe, "status_code");
+            string failedCode = BackendJson.GetString(probe, "status_code");
             return failedCode.Length > 0 ? "测活失败 / HTTP " + failedCode : "测活失败";
         }
 
@@ -700,9 +786,9 @@ namespace SmsWorkbench
         {
             foreach (string section in new[] { "oauth", "refresh" })
             {
-                if (TryGetMap(row, section, out Dictionary<string, object> map))
+                if (BackendJson.TryGetMap(row, section, out var map))
                 {
-                    string error = GetString(map, "error");
+                    string error = BackendJson.GetString(map, "error");
                     if (error.Length > 0) return error;
                 }
             }
@@ -711,27 +797,8 @@ namespace SmsWorkbench
 
         private bool TryExtractScanSummary(string output, out Dictionary<string, object> summary)
         {
-            summary = null;
-            string text = output ?? "";
-            int end = text.LastIndexOf('}');
-            if (end < 0) return false;
-            for (int start = text.LastIndexOf('{', end); start >= 0; start = start > 0 ? text.LastIndexOf('{', start - 1) : -1)
-            {
-                string candidate = text.Substring(start, end - start + 1);
-                try
-                {
-                    var parsed = JsonTextToObject(candidate);
-                    if (parsed.ContainsKey("results") && parsed.ContainsKey("total"))
-                    {
-                        summary = parsed;
-                        return true;
-                    }
-                }
-                catch
-                {
-                }
-            }
-            return false;
+            summary = BackendResultInterpreter.TryExtractScanSummary(output);
+            return summary != null;
         }
 
         private bool BoolValue(Dictionary<string, object> data, string key)
@@ -742,20 +809,20 @@ namespace SmsWorkbench
             return text.Equals("true", StringComparison.OrdinalIgnoreCase) || text == "1";
         }
 
-        private bool TryBuildAccountExportJson(PoolRow row, out Dictionary<string, object> item)
+        private async Task<Dictionary<string, object>> BuildAccountExportJsonAsync(PoolRow row)
         {
-            item = null;
-            if (row == null) return false;
-            if (!TryLoadAccountDataForRow(row, out Dictionary<string, object> data) || data.Count == 0)
+            if (row == null) return null;
+            var data = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+            if (!await TryLoadAccountDataForRowAsync(row, data) || data.Count == 0)
             {
-                return false;
+                return null;
             }
 
             Dictionary<string, object> source = AccountExportState.SelectSource(data);
 
             if (CloneExportJsonValue(source) is not Dictionary<string, object> clean || clean.Count == 0)
             {
-                return false;
+                return null;
             }
 
             EnsureJsonExportEmail(clean, row);
@@ -765,95 +832,30 @@ namespace SmsWorkbench
                 SetJsonExportPlanTypePlus(clean);
             }
 
-            item = clean;
-            return true;
+            return clean;
         }
 
-        private bool TryLoadAccountDataForRow(PoolRow row, out Dictionary<string, object> data)
+        private async Task<bool> TryLoadAccountDataForRowAsync(PoolRow row, Dictionary<string, object> data)
         {
-            data = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
             if (row == null) return false;
 
             string source = (row.SourcePath ?? "").Trim();
-            if (source.EndsWith(".sqlite3", StringComparison.OrdinalIgnoreCase) && File.Exists(source))
-            {
-                if (TryLoadAccountDataFromSqlite(row, out data)) return true;
-            }
-
-            var paths = new List<string> { row.Notes, row.SourcePath };
-            foreach (string path in paths.Where(p => !string.IsNullOrWhiteSpace(p)).Distinct(StringComparer.OrdinalIgnoreCase))
-            {
-                if (!File.Exists(path) || !path.EndsWith(".json", StringComparison.OrdinalIgnoreCase)) continue;
-                try
-                {
-                    data = ReadJsonObject(path);
-                    return data.Count > 0;
-                }
-                catch
-                {
-                }
-            }
-            return false;
-        }
-
-        private bool TryLoadAccountDataFromSqlite(PoolRow row, out Dictionary<string, object> data)
-        {
-            data = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+            if (!source.EndsWith(".sqlite3", StringComparison.OrdinalIgnoreCase) || !File.Exists(source)) return false;
             try
             {
-                string id = OnlyDigits(row.RawLine);
-                string sql;
-                if (id.Length > 0)
+                JsonElement account = await desktopRead.ReadAccountExportAsync(
+                    OnlyDigits(row.RawLine), row.Identifier);
+                foreach (KeyValuePair<string, object> item in BackendJson.ElementToDictionary(account))
                 {
-                    sql = "SELECT raw_json,json_path FROM accounts WHERE id=" + id + " LIMIT 1";
-                }
-                else
-                {
-                    string email = SqlLiteral((row.Identifier ?? "").Trim());
-                    if (email.Length == 0) return false;
-                    sql = "SELECT raw_json,json_path FROM accounts WHERE lower(email)=lower('" + email + "') ORDER BY updated_at DESC LIMIT 1";
-                }
-
-                var rows = SqliteNative.Query(row.SourcePath, sql);
-                if (rows.Count == 0) return false;
-                string rawJson = rows[0].TryGetValue("raw_json", out string raw) ? raw : "";
-                string jsonPath = rows[0].TryGetValue("json_path", out string jp) ? jp : "";
-
-                if (!string.IsNullOrWhiteSpace(jsonPath) && File.Exists(jsonPath) && jsonPath.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
-                {
-                    try
-                    {
-                        MergeJsonObject(data, ReadJsonObject(jsonPath));
-                    }
-                    catch
-                    {
-                    }
-                }
-                if (!string.IsNullOrWhiteSpace(rawJson))
-                {
-                    MergeJsonObject(data, JsonTextToObject(rawJson));
+                    data[item.Key] = item.Value;
                 }
                 return data.Count > 0;
             }
-            catch
+            catch (Exception ex)
             {
-                data = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+                Log("读取账号导出 backend 失败：" + SensitiveDataSanitizer.Redact(row.Identifier) + " " + SensitiveDataSanitizer.Redact(ex.Message));
                 return false;
             }
-        }
-
-        private void MergeJsonObject(Dictionary<string, object> target, Dictionary<string, object> source)
-        {
-            if (target == null || source == null) return;
-            foreach (var pair in source)
-            {
-                target[pair.Key] = pair.Value;
-            }
-        }
-
-        private string SqlLiteral(string value)
-        {
-            return (value ?? "").Replace("'", "''");
         }
 
         private object CloneExportJsonValue(object value)
@@ -878,12 +880,12 @@ namespace SmsWorkbench
         {
             string email = (row?.Identifier ?? "").Trim();
             if (email.Length == 0) return;
-            if (!TryGetMap(item, "user", out Dictionary<string, object> user))
+            if (!BackendJson.TryGetMap(item, "user", out var user))
             {
                 user = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
                 item["user"] = user;
             }
-            if (GetString(user, "email").Length == 0)
+            if (BackendJson.GetString(user, "email").Length == 0)
             {
                 user["email"] = email;
             }
@@ -892,14 +894,14 @@ namespace SmsWorkbench
         private void EnsureJsonExportRefreshToken(Dictionary<string, object> item, Dictionary<string, object> sourceData)
         {
             string rt = FirstJsonString(
-                GetString(sourceData, "oauth_refresh_token"),
-                GetString(sourceData, "refresh_token"),
-                NestedJsonString(sourceData, "codex_session", "refresh_token"),
-                NestedJsonString(sourceData, "token", "refresh_token"),
-                NestedJsonString(sourceData, "credentials", "refresh_token")
+                BackendJson.GetString(sourceData, "oauth_refresh_token"),
+                BackendJson.GetString(sourceData, "refresh_token"),
+                BackendJson.NestedString(sourceData, "codex_session", "refresh_token"),
+                BackendJson.NestedString(sourceData, "token", "refresh_token"),
+                BackendJson.NestedString(sourceData, "credentials", "refresh_token")
             );
             item["refresh_token"] = rt;
-            if (GetString(item, "oauth_refresh_token").Length == 0 && rt.Length > 0)
+            if (BackendJson.GetString(item, "oauth_refresh_token").Length == 0 && rt.Length > 0)
             {
                 item["oauth_refresh_token"] = rt;
             }
@@ -907,7 +909,7 @@ namespace SmsWorkbench
 
         private string NestedJsonString(Dictionary<string, object> data, string section, string key)
         {
-            return TryGetMap(data, section, out Dictionary<string, object> map) ? GetString(map, key) : "";
+            return BackendJson.TryGetMap(data, section, out var map) ? BackendJson.GetString(map, key) : "";
         }
 
         private string FirstJsonString(params string[] values)
@@ -926,7 +928,7 @@ namespace SmsWorkbench
             {
                 item["planType"] = "plus";
             }
-            if (!TryGetMap(item, "account", out Dictionary<string, object> account))
+            if (!BackendJson.TryGetMap(item, "account", out var account))
             {
                 account = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
                 item["account"] = account;
@@ -936,12 +938,12 @@ namespace SmsWorkbench
 
         private string JsonExportDedupKey(Dictionary<string, object> item, PoolRow row)
         {
-            if (TryGetMap(item, "user", out Dictionary<string, object> user))
+            if (BackendJson.TryGetMap(item, "user", out var user))
             {
-                string userEmail = GetString(user, "email").Trim();
+                string userEmail = BackendJson.GetString(user, "email").Trim();
                 if (userEmail.Length > 0) return userEmail.ToLowerInvariant();
             }
-            string email = GetString(item, "email").Trim();
+            string email = BackendJson.GetString(item, "email").Trim();
             if (email.Length > 0) return email.ToLowerInvariant();
             email = (row?.Identifier ?? "").Trim();
             if (email.Length > 0) return email.ToLowerInvariant();
@@ -1023,7 +1025,7 @@ namespace SmsWorkbench
 
         private string DefaultMailboxClientId()
         {
-            string configured = ConfigString("email_registration", "oauth_client_id").Trim();
+            string configured = settingsService.GetString("email_registration.oauth_client_id").Trim();
             return configured.Length > 0 ? configured : "9e5f94bc-e8a4-4e73-b8be-63364c29d753";
         }
 

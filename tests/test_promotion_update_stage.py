@@ -11,6 +11,7 @@ import unittest
 from unittest.mock import patch
 
 from sms_tool import gen_pp_link as g
+from sms_tool import paypal_extract
 
 
 class _Resp:
@@ -55,7 +56,7 @@ class PromotionUpdateStageTests(unittest.TestCase):
             seen["headers"] = extra_headers or {}
             return _Resp(200, {"success": True})
 
-        with patch.object(g, "_checkout_post", side_effect=fake_post):
+        with patch.object(paypal_extract, "_checkout_post", side_effect=fake_post):
             ok = e._checkout_update_promotion("cs_live_X", "openai_llc")
 
         self.assertTrue(ok)
@@ -67,11 +68,11 @@ class PromotionUpdateStageTests(unittest.TestCase):
 
     def test_update_promotion_non_fatal_on_error(self):
         e = g.PPLinkExtractor("at", provider_proxy="http://us", promotion_proxy="http://vn", target_country="US")
-        with patch.object(g, "_checkout_post", return_value=_Resp(409, text="checkout_not_active")):
+        with patch.object(paypal_extract, "_checkout_post", return_value=_Resp(409, text="checkout_not_active")):
             self.assertFalse(e._checkout_update_promotion("cs_live_X", "openai_llc"))
 
-    def test_extract_calls_promotion_before_stripe_init(self):
-        """Full order check: create -> /checkout/update (promotion proxy) -> stripe init."""
+    def test_extract_runs_stripe_init_before_post_approval_promotion(self):
+        """The standard flow must not apply promotion before Stripe init."""
         e = g.PPLinkExtractor(
             "attoken", checkout_proxy="http://us", provider_proxy="http://us",
             promotion_proxy="http://vn", target_country="US", checkout_country="US",
@@ -87,24 +88,21 @@ class PromotionUpdateStageTests(unittest.TestCase):
                 return _Resp(200, {"success": True})
             raise AssertionError(url)
 
-        # Make stripe_init raise right away so we only assert the pre-init ordering.
+        # Stop at init; promotion must not have been called yet.
         def fake_stripe_init(cs_id):
             calls.append(("STRIPE_INIT", cs_id, None))
             raise RuntimeError("stop-after-init-order-check")
 
-        with patch.object(g, "_checkout_post", side_effect=fake_checkout_post):
-            with patch.object(g, "_new_session", lambda proxy="": object()):
+        with patch.object(paypal_extract, "_checkout_post", side_effect=fake_checkout_post):
+            with patch.object(paypal_extract, "_new_session", lambda proxy="": object()):
                 with patch.object(e, "_stripe_init", side_effect=fake_stripe_init):
                     with self.assertRaises(RuntimeError):
                         e.extract()
 
         seq = [c[0] if c[0] != "POST" else c[1].rsplit("/", 1)[-1] for c in calls]
         self.assertEqual(seq[0], "checkout")            # create checkout first
-        self.assertEqual(seq[1], "update")              # then promotion update
-        self.assertEqual(seq[2], "STRIPE_INIT")         # then stripe init
-        # promotion update routed through promotion egress
-        update_call = next(c for c in calls if c[0] == "POST" and c[1].endswith("/checkout/update"))
-        self.assertEqual(update_call[2], "http://vn")
+        self.assertEqual(seq[1], "STRIPE_INIT")         # initialize before approval/promotion
+        self.assertNotIn("update", seq)
 
     def test_run_batch_promotion_matrix_searches_and_stops_on_zero_ba(self):
         """promotion_countries triggers paypal_region x promotion_region search."""

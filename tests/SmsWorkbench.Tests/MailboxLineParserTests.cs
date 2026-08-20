@@ -5,11 +5,12 @@ namespace SmsWorkbench.Tests;
 public sealed class MailboxLineParserTests
 {
     [Theory]
-    [InlineData("user@icloud.com----https://mail.example.test/messages/key/user%40icloud.com", "url_html", "--chatai-mailbox-file")]
-    [InlineData("user@icloud.com----https://mail.example.test/inbox?a=one----two", "url_html", "--chatai-mailbox-file")]
-    [InlineData("sample.one@icloud.com----------https://mail.example.test/share/one", "url_html", "--chatai-mailbox-file")]
-    [InlineData("sample.two@icloud.com-------https://mail.example.test/share/two", "url_html", "--chatai-mailbox-file")]
-    [InlineData("sample.three@icloud.com------https://mail.example.test/share/three", "url_html", "--chatai-mailbox-file")]
+    [InlineData("user@icloud.com----https://mail.example.test/messages/key/user%40icloud.com", "icloud_url", "--mailbox-file")]
+    [InlineData("user@icloud.com----https://mail.example.test/inbox?a=one----two", "icloud_url", "--mailbox-file")]
+    [InlineData("sample.one@icloud.com----------https://mail.example.test/share/one", "icloud_url", "--mailbox-file")]
+    [InlineData("sample.two@icloud.com-------https://mail.example.test/share/two", "icloud_url", "--mailbox-file")]
+    [InlineData("sample.three@icloud.com------https://mail.example.test/share/three", "icloud_url", "--mailbox-file")]
+    [InlineData("user@example.com----https://mail.example.test/inbox", "url_html", "--chatai-mailbox-file")]
     [InlineData("user@hotmail.com----pw----client----refresh", "chatai", "--chatai-mailbox-file")]
     [InlineData("user@example.com----pw----JBSWY3DPEHPK3PXP---", "account_mfa", "--chatai-mailbox-file")]
     [InlineData("user@example.com----pw----JBSWY3DPEHPK3PXP----JBSWY3DPEHPK3PXP", "account_mfa", "--chatai-mailbox-file")]

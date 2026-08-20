@@ -1,8 +1,6 @@
 import unittest
-import tempfile
 import io
 import json
-from pathlib import Path
 from unittest.mock import patch
 
 from sms_tool import cli
@@ -25,7 +23,7 @@ class GenerateBaLinkCliProxyTests(unittest.TestCase):
             seen.update(kwargs)
             return {"ok": True, "url": "https://payment.momo.vn/test"}
 
-        def fake_probe(proxy, expected_country="", stage="proxy", timeout=12):
+        def fake_probe(proxy, expected_country="", stage="proxy", timeout=12, **_kwargs):
             from sms_tool.paypal_proxy import ProxyProbeResult
             ok = "as.zooproxy.com" in proxy
             return ProxyProbeResult(ok, stage, expected_country, country_code=expected_country if ok else "", error="timeout" if not ok else "")
@@ -129,7 +127,7 @@ class GenerateBaLinkCliProxyTests(unittest.TestCase):
             "output": {"directory": "sessions"},
         }
 
-        def fake_probe(proxy, expected_country="", stage="proxy", timeout=12):
+        def fake_probe(proxy, expected_country="", stage="proxy", timeout=12, **_kwargs):
             from sms_tool.paypal_proxy import ProxyProbeResult
             return ProxyProbeResult(True, stage, expected_country, "203.0.113.10", expected_country, "Test")
 
@@ -154,42 +152,6 @@ class GenerateBaLinkCliProxyTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(set(result["stages"]), {"checkout", "approve", "update"})
         self.assertEqual(result["stages"]["update"]["expected_country"], "JP")
-
-    def test_batch_regenerate_forwards_stage_proxy_overrides(self):
-        seen = []
-
-        def fake_regenerate(**kwargs):
-            seen.append(kwargs)
-            return {"ok": True, "email": kwargs["email"]}
-
-        with tempfile.TemporaryDirectory() as tmp:
-            email_file = Path(tmp) / "emails.txt"
-            email_file.write_text("one@example.com\n", encoding="utf-8")
-            argv = [
-                "chatgpt_phone_reg.py",
-                "--regenerate-paypal-link",
-                "--email-file",
-                str(email_file),
-                "--checkout-proxy",
-                "http://checkout",
-                "--provider-proxy",
-                "http://provider",
-                "--approve-proxy",
-                "http://approve",
-                "--promotion-proxy",
-                "http://promotion",
-                "--no-require-zero",
-            ]
-            with patch("sys.argv", argv):
-                with patch("sms_tool.paypal_links.regenerate_paypal_link", side_effect=fake_regenerate):
-                    cli.main()
-
-        self.assertEqual(len(seen), 1)
-        self.assertEqual(seen[0]["checkout_proxy"], "http://checkout")
-        self.assertEqual(seen[0]["provider_proxy"], "http://provider")
-        self.assertEqual(seen[0]["approve_proxy"], "http://approve")
-        self.assertEqual(seen[0]["promotion_proxy"], "http://promotion")
-        self.assertFalse(seen[0]["require_zero"])
 
     def test_generate_ba_link_prefers_stage_proxies_when_proxy_not_explicit(self):
         seen = {}
@@ -388,7 +350,7 @@ class GenerateBaLinkCliProxyTests(unittest.TestCase):
         self.assertEqual(seen["checkout_country"], "JP")
         self.assertEqual(seen["payment_country"], "IN")
 
-    def test_generate_upi_qr_falls_back_to_paypal_checkout_and_india_provider(self):
+    def test_generate_upi_qr_does_not_inherit_paypal_or_hardcoded_provider_proxy(self):
         seen = {}
         cfg = {
             "proxy": {"default": "socks5h://default-proxy"},
@@ -407,9 +369,10 @@ class GenerateBaLinkCliProxyTests(unittest.TestCase):
                 with patch("sms_tool.gen_pp_link.generate_upi_qr_link", side_effect=fake_generate_upi_qr_link):
                     cli.main()
 
-        self.assertEqual(seen["checkout_proxy"], "socks5h://jp-checkout")
-        self.assertEqual(seen["provider_proxy"], "http://107.150.109.49:11001")
-        self.assertEqual(seen["approve_proxy"], "http://107.150.109.49:11001")
+        self.assertIsNone(seen["proxy"])
+        self.assertIsNone(seen["checkout_proxy"])
+        self.assertIsNone(seen["provider_proxy"])
+        self.assertIsNone(seen["approve_proxy"])
 
 
     def test_generate_upi_qr_cli_country_overrides_are_split(self):

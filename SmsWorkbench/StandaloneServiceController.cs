@@ -70,7 +70,8 @@ namespace SmsWorkbench
         {
             lock (startupSync)
             {
-                if (startupTask == null || startupTask.IsCompleted)
+                if (startupTask == null
+                    || (startupTask.IsCompleted && !startupTask.GetAwaiter().GetResult().IsReady))
                     startupTask = EnsureReadyCoreAsync(cancellationToken);
 
                 return startupTask;

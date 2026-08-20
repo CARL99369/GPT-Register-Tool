@@ -66,7 +66,6 @@ public sealed class DesktopWindowSmokeTests
         var editorHost = new Window { Width = 360, Height = 180, Content = proxyEditor };
         editorHost.Show();
         editorHost.UpdateLayout();
-        FlushDispatcher();
 
         Assert.True(proxyEditor.Focusable);
         Assert.NotNull(proxyEditor.Template.FindName("PART_ContentHost", proxyEditor));
@@ -86,7 +85,6 @@ public sealed class DesktopWindowSmokeTests
         var gridHost = new Window { Width = 460, Height = 240, Content = dataGrid };
         gridHost.Show();
         gridHost.UpdateLayout();
-        FlushDispatcher();
 
         AssertStableScrollBars(dataGrid, expectVertical: false, expectHorizontal: true);
         gridHost.Close();
@@ -131,9 +129,7 @@ public sealed class DesktopWindowSmokeTests
         }
 
         viewModel.SelectedCategory = networkCategory;
-        FlushDispatcher();
         settings.UpdateLayout();
-        FlushDispatcher();
 
         FrameworkElement[] editors = FindVisualChildren<FrameworkElement>(settings)
             .Where(element => element.IsVisible
@@ -157,9 +153,9 @@ public sealed class DesktopWindowSmokeTests
         TextBox[] proxyEditors = editors
             .OfType<TextBox>()
             .Where(editor => editor.DataContext is SettingFieldViewModel field
-                && field.Key is "registration_proxy_pool" or "protocol_proxy_pool")
+                && field.Key == "registration_proxy_pool")
             .ToArray();
-        Assert.Equal(2, proxyEditors.Length);
+        Assert.Single(proxyEditors);
         foreach (TextBox proxyEditor in proxyEditors)
         {
             Assert.Equal(148, proxyEditor.ActualHeight, precision: 3);
@@ -188,54 +184,59 @@ public sealed class DesktopWindowSmokeTests
         return new Rect(topLeft, new Size(element.ActualWidth, element.ActualHeight));
     }
 
-    private static void VerifyMainWindowRegistrationAndContextMenu(string rootDirectory)
+    private static void VerifyMainWindowRegistrationAndContextMenu(
+        string rootDirectory,
+        Action<string> stage)
     {
+        stage("construct main window");
         using var logger = new Serilog.LoggerConfiguration().CreateLogger();
-        var backend = new StubBackendClient();
+        var backendClient = new StubBackendClient();
         var main = new MainWindow(
             new TestApplicationPaths(rootDirectory),
-            backend,
+            backendClient,
+            new BackendTaskCoordinator(backendClient),
+            new DesktopReadClient(new BackendTaskCoordinator(backendClient)),
             new WindowPaymentBatchDialogService(),
-            new StubStandaloneServiceController(),
-            new StubFileLauncher(),
+            new PaymentBatchService(new TestApplicationPaths(rootDirectory), backendClient),
             new Wpf.Ui.SnackbarService(),
             new WindowSettingsDialogService(),
+            new SettingsService(new TestApplicationPaths(rootDirectory)),
             logger);
         try
         {
+            stage("show main window");
             main.Show();
             main.UpdateLayout();
-            FlushDispatcher();
-
-            var standaloneButton = Assert.IsType<Button>(main.FindName("StandalonePaymentButton"));
-            Assert.Equal(
-                "直绑支付",
-                System.Windows.Automation.AutomationProperties.GetName(standaloneButton));
-            var accountWorkspace = Assert.IsType<Grid>(main.FindName("AccountWorkspace"));
-            var standaloneWorkspace = Assert.IsType<Grid>(main.FindName("StandaloneWorkspace"));
-            Assert.Equal(Visibility.Visible, accountWorkspace.Visibility);
-            Assert.Equal(Visibility.Collapsed, standaloneWorkspace.Visibility);
-
-            accountWorkspace.Visibility = Visibility.Collapsed;
-            standaloneWorkspace.Visibility = Visibility.Visible;
-            var showAccounts = typeof(MainWindow).GetMethod(
-                "ShowAccountWorkspace_Click",
-                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
-            Assert.NotNull(showAccounts);
-            showAccounts.Invoke(main, new object[] { standaloneButton, new RoutedEventArgs() });
-            Assert.Equal(Visibility.Visible, accountWorkspace.Visibility);
-            Assert.Equal(Visibility.Collapsed, standaloneWorkspace.Visibility);
+            Assert.DoesNotContain(
+                backendClient.Commands,
+                command => command.Arguments.Contains("--doctor", StringComparer.Ordinal));
+            main.RunStartupDoctorProbeAsync().GetAwaiter().GetResult();
+            Assert.Contains(
+                backendClient.Commands,
+                command => command.Arguments.Contains("--doctor", StringComparer.Ordinal));
+            stage("verify account grid");
+            VerifyAccountScanSummary(main);
 
             var accountGrid = Assert.IsType<DataGrid>(main.FindName("AccountGrid"));
+            Assert.DoesNotContain(
+                FindVisualChildren<TextBlock>(main),
+                textBlock => textBlock.Text == "重新生成支付链接");
             string[] headers = accountGrid.Columns.Select(column => column.Header?.ToString() ?? "").ToArray();
             Assert.DoesNotContain("注册批次", headers);
             Assert.DoesNotContain("入库", headers);
+            DataGridColumn promotionColumn = Assert.Single(
+                accountGrid.Columns,
+                column => (column.Header?.ToString() ?? "") == "优惠状态");
+            Assert.True(promotionColumn.CanUserSort);
+            Assert.Equal("PromotionStatus", promotionColumn.SortMemberPath);
 
             var contextMenu = Assert.IsType<ContextMenu>(accountGrid.ContextMenu);
             contextMenu.PlacementTarget = accountGrid;
             contextMenu.Placement = PlacementMode.Center;
+            stage("open account context menu");
             contextMenu.IsOpen = true;
-            FlushDispatcher();
+            contextMenu.ApplyTemplate();
+            contextMenu.UpdateLayout();
 
             Assert.NotNull(contextMenu.Template.FindName("MenuChrome", contextMenu));
             MenuItem[] menuItems = contextMenu.Items.OfType<MenuItem>().ToArray();
@@ -254,19 +255,22 @@ public sealed class DesktopWindowSmokeTests
             Assert.True(headerLeftEdges.Max() - headerLeftEdges.Min() <= 0.5);
             contextMenu.IsOpen = false;
 
+            stage("show general registration dialog");
             string[] sourceOptions = Array.Empty<string>();
             string[] fieldLabels = Array.Empty<string>();
             string[] checkBoxLabels = Array.Empty<string>();
             int comboBoxCount = 0;
-            Exception? captureFailure = null;
-            Dispatcher.CurrentDispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, new Action(() =>
-            {
-                try
+            var method = typeof(MainWindow).GetMethod(
+                "CreateRegisterOptionsDialog",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+            Assert.NotNull(method);
+            var registerDialog = Assert.IsType<Window>(method.Invoke(
+                main,
+                new object[] { new Action<RegisterOptions>(_ => { }) }));
+            InspectWindow(
+                registerDialog,
+                dialog =>
                 {
-                    Window dialog = Application.Current.Windows
-                        .Cast<Window>()
-                        .Single(window => window.Title == "一键注册");
-                    dialog.UpdateLayout();
                     ComboBox[] comboBoxes = FindVisualChildren<ComboBox>(dialog).ToArray();
                     comboBoxCount = comboBoxes.Length;
                     ComboBox sourceBox = comboBoxes.First();
@@ -284,103 +288,159 @@ public sealed class DesktopWindowSmokeTests
                         .Select(checkBox => checkBox.Content?.ToString() ?? "")
                         .Where(text => !string.IsNullOrWhiteSpace(text))
                         .ToArray();
-                    dialog.Close();
-                }
-                catch (Exception exception)
-                {
-                    captureFailure = exception;
-                    Application.Current.Windows
-                        .Cast<Window>()
-                        .FirstOrDefault(window => window.Title == "一键注册")
-                        ?.Close();
-                }
-            }));
-
-            var method = typeof(MainWindow).GetMethod(
-                "ShowRegisterOptionsDialog",
-                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
-            Assert.NotNull(method);
-            Assert.Null(method.Invoke(main, null));
-            Assert.Null(captureFailure);
-            Assert.Contains("CF Woker Mail", sourceOptions);
+                });
+            Assert.Equal(new[]
+            {
+                "ReMail 邮箱",
+                "Smailr 邮箱",
+                "Outlook/Hotmail/iCloud 邮箱池",
+                "CF Worker 域名邮箱",
+                "手机号注册"
+            }, sourceOptions);
+            Assert.DoesNotContain(sourceOptions, option => option.Contains("📱", StringComparison.Ordinal));
             Assert.DoesNotContain("liziai.cloud (CFWorker)", sourceOptions);
             Assert.DoesNotContain("邮箱采购上限", fieldLabels);
             Assert.DoesNotContain("最大采购成本", fieldLabels);
             Assert.DoesNotContain("注册批次 ID", fieldLabels);
             Assert.DoesNotContain("生链方式", fieldLabels);
             Assert.DoesNotContain("只注册，不生成支付链接", checkBoxLabels);
+            Assert.Contains("关闭 2FA（不注册 TOTP）", checkBoxLabels);
+            Assert.Contains("注册完成后查询试用优惠", checkBoxLabels);
             Assert.Equal(1, comboBoxCount);
 
+            stage("show selected registration dialog");
             int selectedComboBoxCount = -1;
             int selectedCheckBoxCount = -1;
-            captureFailure = null;
-            Dispatcher.CurrentDispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, new Action(() =>
-            {
-                try
+            method = typeof(MainWindow).GetMethod(
+                "CreateSelectedRegisterOptionsDialog",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+            Assert.NotNull(method);
+            var selectedRegisterDialog = Assert.IsType<Window>(method.Invoke(
+                main,
+                new object[] { 1, new Action<RegisterOptions>(_ => { }) }));
+            InspectWindow(
+                selectedRegisterDialog,
+                dialog =>
                 {
-                    Window dialog = Application.Current.Windows
-                        .Cast<Window>()
-                        .Single(window => window.Title == "选中邮箱注册");
-                    dialog.UpdateLayout();
                     selectedComboBoxCount = FindVisualChildren<ComboBox>(dialog).Count();
                     selectedCheckBoxCount = FindVisualChildren<CheckBox>(dialog).Count();
-                    dialog.Close();
-                }
-                catch (Exception exception)
-                {
-                    captureFailure = exception;
-                    Application.Current.Windows
-                        .Cast<Window>()
-                        .FirstOrDefault(window => window.Title == "选中邮箱注册")
-                        ?.Close();
-                }
-            }));
-
-            method = typeof(MainWindow).GetMethod(
-                "ShowSelectedRegisterOptionsDialog",
-                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
-            Assert.NotNull(method);
-            Assert.Null(method.Invoke(main, new object[] { 1 }));
-            Assert.Null(captureFailure);
+                });
             Assert.Equal(0, selectedComboBoxCount);
-            Assert.Equal(0, selectedCheckBoxCount);
-
-            bool phoneSourceDialogShown = false;
-            main.SelectedRow = new PoolRow
-            {
-                Identifier = "mfa@example.com",
-                MailboxProvider = "account_mfa",
-                RawLine = "mfa@example.com----password----JBSWY3DPEHPK3PXP"
-            };
-            Dispatcher.CurrentDispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, new Action(() =>
-            {
-                Window? dialog = Application.Current.Windows
-                    .Cast<Window>()
-                    .FirstOrDefault(window => ReferenceEquals(window.Owner, main));
-                phoneSourceDialogShown = dialog != null;
-                dialog?.Close();
-            }));
-
-            method = typeof(MainWindow).GetMethod(
-                "OneClickSms_Click",
-                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
-            Assert.NotNull(method);
-            method.Invoke(main, new object[] { main, new RoutedEventArgs() });
-            FlushDispatcher();
-            Assert.True(phoneSourceDialogShown);
-            Assert.Null(backend.LastCommand);
+            Assert.Equal(2, selectedCheckBoxCount);
+            stage("verify mailbox selection routing");
+            VerifyMailboxSelectionFileRouting(main);
         }
         finally
         {
+            stage("close main window");
             main.Close();
+        }
+    }
+
+    private static void VerifyAccountScanSummary(MainWindow main)
+    {
+        var formatter = typeof(MainWindow).GetMethod(
+            "FormatDirectProbeSummary",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+        Assert.NotNull(formatter);
+
+        var results = new List<Dictionary<string, object>>
+        {
+            new()
+            {
+                ["probe"] = new Dictionary<string, object>
+                {
+                    ["ok"] = true, ["status"] = "active", ["status_code"] = 200
+                }
+            },
+            new()
+            {
+                ["probe"] = new Dictionary<string, object>
+                {
+                    ["ok"] = false, ["status"] = "token_invalid", ["status_code"] = 401
+                }
+            },
+            new()
+            {
+                ["probe"] = new Dictionary<string, object>
+                {
+                    ["ok"] = false, ["status"] = "account_deactivated", ["terminal"] = true
+                }
+            },
+            new()
+            {
+                ["status"] = "account_deactivated",
+                ["probe"] = new Dictionary<string, object>
+                {
+                    ["ok"] = false, ["status"] = "unknown", ["status_code"] = 500
+                }
+            },
+            new()
+            {
+                ["probe"] = new Dictionary<string, object>
+                {
+                    ["ok"] = false, ["status"] = "unknown", ["status_code"] = 500
+                }
+            }
+        };
+        var summary = new Dictionary<string, object>
+        {
+            ["relogin_attempted"] = 1,
+            ["relogin_success"] = 0,
+            ["relogin_failed"] = 1,
+            ["relogin_account_deactivated"] = 1
+        };
+
+        string formatted = Assert.IsType<string>(formatter.Invoke(main, new object[] { results, summary }));
+        Assert.Contains("总数：5", formatted);
+        Assert.Contains("AT有效：1", formatted);
+        Assert.Contains("AT失效：1", formatted);
+        Assert.Contains("账号停用：2", formatted);
+        Assert.Contains("其他失败：1", formatted);
+        Assert.Contains("确认停用：1", formatted);
+    }
+
+    private static void VerifyMailboxSelectionFileRouting(MainWindow main)
+    {
+        var method = typeof(MainWindow).GetMethod(
+            "TryCreateMailboxFile",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        string icloudLine = "target@icloud.com----https://mail.example/messages/AbCd_0123-credential/target%40icloud.com";
+        string chataiLine = "other@example.com----password----client-id----refresh-token";
+        AssertSelectionFile(method, main, new[] { icloudLine }, "--mailbox-file");
+        AssertSelectionFile(method, main, new[] { icloudLine, chataiLine }, "--chatai-mailbox-file");
+    }
+
+    private static void AssertSelectionFile(
+        System.Reflection.MethodInfo method,
+        MainWindow main,
+        string[] lines,
+        string expectedArgument)
+    {
+        var rows = lines.Select(line => new PoolRow { RawLine = line }).ToArray();
+        object?[] arguments = { rows, "", "", 0 };
+        Assert.True(Assert.IsType<bool>(method.Invoke(main, arguments)));
+        Assert.Equal(expectedArgument, Assert.IsType<string>(arguments[1]));
+        string path = Assert.IsType<string>(arguments[2]);
+        try
+        {
+            Assert.Equal(lines.Length, Assert.IsType<int>(arguments[3]));
+            Assert.Equal(lines, File.ReadAllLines(path, System.Text.Encoding.UTF8));
+        }
+        finally
+        {
+            if (File.Exists(path)) File.Delete(path);
         }
     }
 
     [Fact]
     public void SettingsPaymentAndSharedControlsLoadOnStaThread()
     {
-        RunOnSta(() =>
+        RunOnSta(stage =>
         {
+            stage("create application");
             using var fixture = new TemporaryDirectory();
             File.WriteAllText(
                 Path.Combine(fixture.Path, "config.json"),
@@ -388,9 +448,12 @@ public sealed class DesktopWindowSmokeTests
             var application = CreateApplication();
             var launcher = new StubFileLauncher();
 
+            stage("verify combo box popup");
             VerifyComboBoxPopup();
+            stage("verify scrollable controls");
             VerifyScrollableEditorsAndTables();
 
+            stage("show settings window");
             var settingsViewModel = new SettingsViewModel(
                 new SettingsService(new TestApplicationPaths(fixture.Path)),
                 launcher);
@@ -414,23 +477,33 @@ public sealed class DesktopWindowSmokeTests
             secretBox.Password = "second-edit";
             Assert.Equal("second-edit", secretField.Value);
             Assert.NotNull(secretBox.GetBindingExpression(PasswordBoxBinding.BoundPasswordProperty));
+            stage("verify settings layout");
             VerifySettingsLayout(settings, settingsViewModel);
             settings.Close();
 
-            var payment = new PaymentBatchWindow(new PaymentBatchViewModel(
+            stage("show payment window");
+            var paymentViewModel = new PaymentBatchViewModel(
                 new WindowPaymentBatchService(),
                 launcher,
-                new[] { new PaymentBatchAccount("smoke@example.com", true) }));
+                new[] { new PaymentBatchAccount("smoke@example.com", true) });
+            var payment = new PaymentBatchWindow(paymentViewModel);
             payment.Show();
             payment.UpdateLayout();
             Assert.True(payment.ActualWidth >= payment.MinWidth);
             Assert.True(payment.ActualHeight >= payment.MinHeight);
             Assert.DoesNotContain(
-                ((PaymentBatchViewModel)payment.DataContext).PaymentMethodOptions,
+                paymentViewModel.PaymentMethodOptions,
                 option => option.Id == "blik");
+            Assert.Contains(
+                paymentViewModel.PaymentMethodOptions,
+                option => option.Id == "direct_card");
+            Assert.IsType<DataGrid>(payment.FindName("ResultsGrid"));
             payment.Close();
-            VerifyMainWindowRegistrationAndContextMenu(fixture.Path);
+            stage("verify main window dialogs");
+            VerifyMainWindowRegistrationAndContextMenu(fixture.Path, stage);
+            stage("shutdown application");
             application.Shutdown();
+            stage("complete");
         });
     }
 
@@ -443,7 +516,21 @@ public sealed class DesktopWindowSmokeTests
     }
 
     private static void FlushDispatcher()
-        => Dispatcher.CurrentDispatcher.Invoke(() => { }, DispatcherPriority.ApplicationIdle);
+        => Dispatcher.CurrentDispatcher.Invoke(() => { }, DispatcherPriority.Background);
+
+    private static void InspectWindow(Window dialog, Action<Window> inspect)
+    {
+        try
+        {
+            dialog.Show();
+            dialog.UpdateLayout();
+            inspect(dialog);
+        }
+        finally
+        {
+            dialog.Close();
+        }
+    }
 
     private static IEnumerable<T> FindVisualChildren<T>(DependencyObject parent) where T : DependencyObject
     {
@@ -458,14 +545,15 @@ public sealed class DesktopWindowSmokeTests
         }
     }
 
-    private static void RunOnSta(Action action)
+    private static void RunOnSta(Action<Action<string>> action)
     {
         Exception? failure = null;
+        string stage = "thread startup";
         var thread = new Thread(() =>
         {
             try
             {
-                action();
+                action(value => stage = value);
             }
             catch (Exception exception)
             {
@@ -475,7 +563,9 @@ public sealed class DesktopWindowSmokeTests
         thread.SetApartmentState(ApartmentState.STA);
         thread.Start();
 
-        Assert.True(thread.Join(TimeSpan.FromSeconds(60)), "WPF smoke test did not finish in time.");
+        Assert.True(
+            thread.Join(TimeSpan.FromSeconds(20)),
+            "WPF smoke test did not finish in time. Last stage: " + stage);
         Assert.Null(failure);
     }
 
@@ -483,13 +573,32 @@ public sealed class DesktopWindowSmokeTests
     {
         public IReadOnlyList<PaymentMatrixRow> LoadMatrix(string paymentMethod) => Array.Empty<PaymentMatrixRow>();
 
+        public PaymentBatchProxyConfiguration LoadProxyConfiguration(string paymentMethod)
+            => new("", "", "", "JP");
+
+        public SettingsSaveResult SaveProxyConfiguration(
+            string paymentMethod,
+            PaymentBatchProxyConfiguration configuration)
+            => new(true);
+
         public PaymentMatrixRow CreateDefaultMatrixRow(string paymentMethod) => new()
         {
             Name = "default",
             SampleSize = 1
         };
 
-        public Task<JsonElement> RunAsync(PaymentBatchRequest request, CancellationToken cancellationToken)
+        public Task<JsonElement> RunAsync(
+            PaymentBatchRequest request,
+            CancellationToken cancellationToken)
+            => throw new NotSupportedException();
+
+        public Task<JsonElement> ProbeProxiesAsync(
+            string paymentMethod,
+            string checkoutProxyPool,
+            string approveProxyPool,
+            string checkoutCountry,
+            string approveCountry,
+            CancellationToken cancellationToken)
             => throw new NotSupportedException();
     }
 

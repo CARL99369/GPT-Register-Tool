@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import threading
 import time
 import uuid
@@ -18,8 +19,10 @@ from .paths import project_path, runtime_file
 
 DEFAULT_BASE_URL = "https://remail.aishop6.com"
 DEFAULT_PROJECT_ID = 2
-DEFAULT_PRODUCT_ID = 5
 _DEAD_REMAIL_LOCK = threading.Lock()
+_OPENAI_REMAIL_SENDERS = re.compile(
+    r"(?i)(?:otp@tm1\.openai\.com|noreply@tm\.openai\.com|(?:otp|noreply)@openai\.com)"
+)
 
 
 class ReMailHttpError(RuntimeError):
@@ -334,13 +337,12 @@ def _order_options(args=None, service_mode=None):
         raise ValueError("ReMail supply must be private_first or public_only")
     try:
         project_id = int(_arg_or_config(args, "remail_project_id", "project_id", DEFAULT_PROJECT_ID))
-        product_id = int(_arg_or_config(args, "remail_product_id", "product_id", DEFAULT_PRODUCT_ID))
     except (TypeError, ValueError) as exc:
-        raise ValueError("ReMail project_id and product_id must be integers") from exc
-    suffix = str(_arg_or_config(args, "remail_email_suffix", "email_suffix", "") or "").strip().lstrip("@")
-    payload = {"projectId": project_id, "productId": product_id}
-    if suffix:
-        payload["emailSuffix"] = suffix
+        raise ValueError("ReMail project_id must be an integer") from exc
+    suffix = str(
+        _arg_or_config(args, "remail_email_suffix", "email_suffix", "outlook.com") or "outlook.com"
+    ).strip().lstrip("@")
+    payload = {"projectId": project_id, "emailSuffix": suffix}
     return mode, supply, payload
 
 
@@ -439,8 +441,11 @@ def _recover_recent_remail_batch(*, started_at, quantity, mode, payload):
             continue
         if int(item.get("projectId") or 0) != int(payload.get("projectId") or 0):
             continue
-        if int(item.get("projectProductId") or 0) != int(payload.get("productId") or 0):
-            continue
+        requested_suffix = str(payload.get("emailSuffix") or "").strip().lower()
+        if requested_suffix and requested_suffix not in {"outlook", "domain"}:
+            delivery_domain = str(item.get("deliveryEmail") or "").strip().lower().rpartition("@")[2]
+            if delivery_domain != requested_suffix:
+                continue
         candidates.append(item)
 
     if len(candidates) != quantity:
@@ -734,6 +739,21 @@ def _remail_item_received_ts(item):
     return _message_received_ts({"receivedDateTime": str((item or {}).get("receivedAt") or "")})
 
 
+def _trusted_structured_remail_code(mailbox, item):
+    """Return ReMail's structured OTP only for the target mailbox and a known OpenAI sender."""
+    code = str((item or {}).get("verificationCode") or "").strip()
+    recipient = str((item or {}).get("recipient") or "").strip().lower()
+    target = str(getattr(mailbox, "email", "") or "").strip().lower()
+    sender = str((item or {}).get("sender") or "")
+    if not re.fullmatch(r"\d{6}", code):
+        return ""
+    if not recipient or recipient != target:
+        return ""
+    if not _OPENAI_REMAIL_SENDERS.search(sender):
+        return ""
+    return code
+
+
 def _poll_remail_otp(mailbox, subject_keyword="", timeout=300, issued_after_unix=0, proxy=None, excluded_otps=None, poll_interval=None):
     """Poll ReMail /v1/pickup for OTP codes with adaptive interval.
 
@@ -784,14 +804,17 @@ def _poll_remail_otp(mailbox, subject_keyword="", timeout=300, issued_after_unix
                 msg_id = str(item.get("id") or "").strip()
                 if seen_message_id and msg_id == seen_message_id:
                     continue
-                vc = str(item.get("verificationCode") or "").strip()
+                vc = _trusted_structured_remail_code(mailbox, item)
                 if not vc or vc in excluded:
                     continue
                 # Validate keyword if specified
                 if keyword:
                     subject_lc = str(item.get("subject") or "").lower()
                     keywords = [p.strip().lower() for p in str(keyword).split("|") if p.strip()]
-                    if keywords and not any(p in subject_lc for p in keywords):
+                    # ReMail currently returns localized subjects with broken
+                    # encoding for some Outlook orders. A verified structured
+                    # code from an exact OpenAI sender remains authoritative.
+                    if keywords and not any(p in subject_lc for p in keywords) and "chatgpt" not in subject_lc:
                         continue
                 # Validate timestamp
                 recv_ts = _remail_item_received_ts(item)

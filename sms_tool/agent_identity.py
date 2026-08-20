@@ -14,6 +14,7 @@ from curl_cffi import requests as curl_requests
 from .codex_export import build_codex_json
 from .config import CFG
 from .paths import output_dir
+from .phone_proxy import normalize_proxy_url
 
 
 REGISTER_URL = "https://auth.openai.com/api/accounts/v1/agent/register"
@@ -274,7 +275,6 @@ def _refresh_agent_identity_chatgpt_session(data, email, json_path="", proxy="",
             email=email,
             session_file=json_path if json_path and Path(json_path).is_file() else "",
             timeout=max(30, int(timeout or 30)),
-            browser=False,
             proxy=proxy,
         )
         if not refreshed.get("ok"):
@@ -624,10 +624,7 @@ def _token_expired(access_token):
 
 
 def _normalize_proxy(value):
-    proxy = str(value or "").strip()
-    if proxy and "://" not in proxy:
-        proxy = "http://" + proxy
-    return proxy if proxy.lower().startswith(("http://", "https://")) else ""
+    return normalize_proxy_url(value)
 
 
 def _create_agent_registration_session(proxy=""):

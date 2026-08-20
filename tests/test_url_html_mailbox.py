@@ -57,7 +57,7 @@ def test_url_html_mailbox_accepts_four_or_more_separator_hyphens(
 def test_mailbox_file_loader_prioritizes_url_html_over_chongzhi_separator(tmp_path):
     source = tmp_path / "mailboxes.txt"
     source.write_text(
-        "user@icloud.com----------https://mail.example.test/share/token\n",
+        "user@example.com----------https://mail.example.test/share/token\n",
         encoding="utf-8",
     )
 

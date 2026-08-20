@@ -15,6 +15,7 @@ from .registration_concurrency import (
     registration_stage_metrics,
     release_registration_stage,
 )
+from .sanitizer import sanitize as _sanitize, sanitize_text as _sanitize_text
 
 
 _current: contextvars.ContextVar["RegistrationProgress | None"] = contextvars.ContextVar(
@@ -30,19 +31,34 @@ class RegistrationProgress:
         self.email = str(email or "")
         self.started_at = int(time.time())
         self.events: list[dict[str, Any]] = []
+        self.sequence = 0
         self.last_stage = "started"
         self.stage("started")
 
     def stage(self, name: str, status: str = "running", detail: str = "") -> None:
         self.last_stage = str(name or "unknown")
+        self.sequence += 1
         event = {
             "stage": self.last_stage,
             "status": str(status or "running"),
             "at": int(time.time()),
+            "sequence": self.sequence,
         }
         if detail:
-            event["detail"] = str(detail)[:240]
+            event["detail"] = _sanitize_text(detail)[:240]
         self.events.append(event)
+        try:
+            from .desktop_ipc import emit_event
+
+            emit_event({
+                "domain": "registration",
+                "run_id": self.run_id,
+                "account_ref": self.email,
+                **event,
+            })
+        except (OSError, ValueError, TypeError, RuntimeError):
+            # A desktop observer must never affect registration behavior.
+            return
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -54,9 +70,13 @@ class RegistrationProgress:
 
     def persist(self, result: dict[str, Any] | None, error: str = "") -> None:
         success = bool((result or {}).get("success"))
-        final_error = str(error or (result or {}).get("error") or "")[:300]
-        self.stage("completed" if success else "failed", "success" if success else "failed", final_error)
-        row = {
+        final_error = _sanitize_text(error or (result or {}).get("error") or "")[:300]
+        terminal_stage = "completed" if success else "failed"
+        terminal_status = "success" if success else "failed"
+        last_event = self.events[-1] if self.events else {}
+        if last_event.get("stage") != terminal_stage or last_event.get("status") != terminal_status:
+            self.stage(terminal_stage, terminal_status, final_error)
+        row = _sanitize({
             "run_id": self.run_id,
             "email": self.email or str((result or {}).get("email") or ""),
             "success": success,
@@ -65,7 +85,7 @@ class RegistrationProgress:
             "finished_at": int(time.time()),
             "last_stage": self.last_stage,
             "events": self.events,
-        }
+        })
         path = runtime_file(CFG, "registration_progress.jsonl")
         with _write_lock:
             path.parent.mkdir(parents=True, exist_ok=True)

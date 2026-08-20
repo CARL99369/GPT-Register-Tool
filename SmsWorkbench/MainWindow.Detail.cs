@@ -4,12 +4,15 @@ namespace SmsWorkbench
     {
         // Account detail dialog and detail formatting
         private void ShowAccountDetail(PoolRow row)
+            => RunUiTask(() => ShowAccountDetailAsync(row));
+
+        private async Task ShowAccountDetailAsync(PoolRow row)
         {
             if (row == null) return;
-            string detail = BuildAccountDetail(row);
+            string detail = await BuildAccountDetailAsync(row);
             string paypalUrl = row.PayPalUrl ?? "";
             bool hasPayPal = !string.IsNullOrWhiteSpace(paypalUrl);
-            string accessToken = ResolveAccountAccessToken(row);
+            string accessToken = await ResolveAccountAccessTokenAsync(row);
             bool hasAccessToken = !string.IsNullOrWhiteSpace(accessToken);
             var dialog = new Window
             {
@@ -72,8 +75,6 @@ namespace SmsWorkbench
                 ("邮箱", row.Identifier),
                 ("类型", row.AccountType ?? ""),
                 ("状态", row.Status ?? ""),
-                ("额度 5h", FormatQuotaWindow(row.Quota5hUsed, row.Quota5hLimit, row.Quota5hRemaining, row.Quota5hPercent)),
-                ("额度 7d", FormatQuotaWindow(row.Quota7dUsed, row.Quota7dLimit, row.Quota7dRemaining, row.Quota7dPercent)),
                 ("支付状态", row.PayPalStatus ?? ""),
                 ("支付金额", row.PayPalAmount ?? ""),
                 ("Refresh Token", row.RefreshTokenStatus ?? ""),
@@ -201,22 +202,22 @@ namespace SmsWorkbench
             leftActions.Children.Add(openButton);
 
             var copyAtButton = new Button { Content = "一键复制AT", MinWidth = 100, IsEnabled = hasAccessToken, Margin = new Thickness(0, 0, 8, 0) };
-            copyAtButton.Click += async (_, __) =>
+            copyAtButton.Click += (_, __) => RunUiTask(async () =>
             {
                 if (!hasAccessToken) return;
                 Clipboard.SetText(accessToken);
                 copyAtButton.Content = "已复制";
                 await Task.Delay(1200);
                 copyAtButton.Content = "一键复制AT";
-            };
+            });
             leftActions.Children.Add(copyAtButton);
 
             var checkAliveButton = new Button { Content = "账号测活", MinWidth = 100, Margin = new Thickness(0, 0, 8, 0) };
-            checkAliveButton.Click += async (_, __) =>
+            checkAliveButton.Click += (_, __) => RunUiTask(async () =>
             {
                 dialog.Close();
                 await CheckAccountAliveAsync(row);
-            };
+            });
             leftActions.Children.Add(checkAliveButton);
 
             // Right: primary actions
@@ -224,7 +225,7 @@ namespace SmsWorkbench
             var openPayPalButton = new Button { Content = "打开支付链接", MinWidth = 120, IsEnabled = hasPayPal, Margin = new Thickness(0, 0, 8, 0) };
             openPayPalButton.Click += (_, __) => OpenPayPalUrl(paypalUrl, row.Identifier);
             var copyPayPalButton = new Button { Content = "复制支付链接", MinWidth = 120, IsEnabled = hasPayPal, Margin = new Thickness(0, 0, 8, 0) };
-            copyPayPalButton.Click += (_, __) => CopyPayPalUrl(paypalUrl);
+            copyPayPalButton.Click += (_, __) => CopyPayPalUrl(paypalUrl, row.Identifier);
             var markPayPalCompleteButton = new Button { Content = "标记支付完成", MinWidth = 120, Style = (System.Windows.Style)FindResource("PrimaryButton"), Margin = new Thickness(0, 0, 8, 0) };
             markPayPalCompleteButton.Click += (_, __) =>
             {
@@ -249,9 +250,10 @@ namespace SmsWorkbench
             dialog.ShowDialog();
         }
 
-        private string ResolveAccountAccessToken(PoolRow row)
+        private async Task<string> ResolveAccountAccessTokenAsync(PoolRow row)
         {
-            if (!TryLoadAccountDataForRow(row, out Dictionary<string, object> data) || data.Count == 0)
+            var data = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+            if (!await TryLoadAccountDataForRowAsync(row, data) || data.Count == 0)
             {
                 return "";
             }
@@ -266,8 +268,11 @@ namespace SmsWorkbench
         }
 
         private void OpenAccountJson(PoolRow row)
+            => RunUiTask(() => OpenAccountJsonAsync(row));
+
+        private async Task OpenAccountJsonAsync(PoolRow row)
         {
-            string path = ResolveAccountJsonPath(row);
+            string path = await ResolveAccountJsonPathAsync(row);
             if (string.IsNullOrWhiteSpace(path))
             {
                 MessageBox.Show("未找到该账号对应的 JSON 文件。", "打开源文件", MessageBoxButton.OK, MessageBoxImage.Information);
@@ -276,7 +281,7 @@ namespace SmsWorkbench
             OpenPath(path);
         }
 
-        private string ResolveAccountJsonPath(PoolRow row)
+        private async Task<string> ResolveAccountJsonPathAsync(PoolRow row)
         {
             if (row == null) return "";
             string notes = (row.Notes ?? "").Trim();
@@ -287,16 +292,14 @@ namespace SmsWorkbench
 
             try
             {
-                string sql = "SELECT email,json_path,raw_json FROM accounts WHERE id=" + OnlyDigits(row.RawLine);
-                var rows = SqliteNative.Query(source, sql);
-                if (rows.Count == 0) return "";
-                Dictionary<string, string> data = rows[0];
-                string jsonPath = data.TryGetValue("json_path", out string rawJsonPath) ? rawJsonPath : "";
+                JsonElement payload = await desktopRead.ReadAccountAsync(OnlyDigits(row.RawLine), row.Identifier);
+                if (!payload.TryGetProperty("account", out JsonElement account)) return "";
+                Dictionary<string, object> data = JsonElementToDictionary(account);
+                string jsonPath = GetString(data, "json_path");
                 if (File.Exists(jsonPath) && jsonPath.EndsWith(".json", StringComparison.OrdinalIgnoreCase)) return jsonPath;
-
-                string rawJson = data.TryGetValue("raw_json", out string rawRawJson) ? rawRawJson : "";
+                string rawJson = data.TryGetValue("session", out object session) ? JsonSerializer.Serialize(session) : "";
                 if (string.IsNullOrWhiteSpace(rawJson)) return "";
-                string email = data.TryGetValue("email", out string rawEmail) ? rawEmail : row.Identifier;
+                string email = GetString(data, "email");
                 string safeEmail = Regex.Replace((email ?? "unknown").Trim(), @"[^a-zA-Z0-9_.@+-]+", "_");
                 string dir = Path.Combine(rootDir, "runtime", "account_json");
                 Directory.CreateDirectory(dir);
@@ -322,12 +325,6 @@ namespace SmsWorkbench
             {
                 return rawJson;
             }
-        }
-
-        private static string FormatQuotaWindow(string used, string limit, string remaining, string percent)
-        {
-            if (string.IsNullOrEmpty(used) && string.IsNullOrEmpty(limit)) return "—";
-            return $"{used}/{limit} ({percent}) 剩 {remaining}";
         }
 
         private void AddDetailRow(Grid parent, int row, string label, string value)
@@ -364,7 +361,7 @@ namespace SmsWorkbench
             parent.Children.Add(valueBox);
         }
 
-        private string BuildAccountDetail(PoolRow row)
+        private async Task<string> BuildAccountDetailAsync(PoolRow row)
         {
             var lines = new List<string>
             {
@@ -381,22 +378,15 @@ namespace SmsWorkbench
             {
                 if (row.SourcePath.EndsWith(".sqlite3", StringComparison.OrdinalIgnoreCase))
                 {
-                    string sql = "SELECT * FROM accounts WHERE id=" + OnlyDigits(row.RawLine);
-                    var rows = SqliteNative.Query(row.SourcePath, sql);
-                    if (rows.Count > 0)
+                    JsonElement payload = await desktopRead.ReadAccountAsync(OnlyDigits(row.RawLine), row.Identifier);
+                    if (payload.TryGetProperty("account", out JsonElement account))
                     {
-                        foreach (KeyValuePair<string, string> item in rows[0])
+                        foreach (KeyValuePair<string, object> item in JsonElementToDictionary(account))
                         {
-                            lines.Add(item.Key + ": " + MaskSensitiveField(item.Key, item.Value));
+                            lines.Add(item.Key + ": " + MaskSensitiveField(item.Key, Convert.ToString(item.Value) ?? ""));
                         }
                     }
                     return string.Join(Environment.NewLine, lines);
-                }
-
-                if (File.Exists(row.SourcePath) && row.SourcePath.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
-                {
-                    Dictionary<string, object> data = ReadJsonObject(row.SourcePath);
-                    AppendJsonDetail(lines, data, "");
                 }
             }
             catch (Exception ex)
@@ -404,25 +394,6 @@ namespace SmsWorkbench
                 lines.Add("detail_error: " + ex.Message);
             }
             return string.Join(Environment.NewLine, lines);
-        }
-
-        private void AppendJsonDetail(List<string> lines, Dictionary<string, object> data, string prefix)
-        {
-            foreach (KeyValuePair<string, object> item in data)
-            {
-                string key = string.IsNullOrEmpty(prefix) ? item.Key : prefix + "." + item.Key;
-                if (item.Value is Dictionary<string, object> nested)
-                {
-                    AppendJsonDetail(lines, nested, key);
-                    continue;
-                }
-                if (item.Value is List<object> list)
-                {
-                    lines.Add(key + ": [" + list.Count + " item(s)]");
-                    continue;
-                }
-                lines.Add(key + ": " + MaskSensitiveField(key, Convert.ToString(item.Value) ?? ""));
-            }
         }
 
         private string MaskSensitiveField(string key, string value)
