@@ -151,13 +151,13 @@ class GmailMailboxTests(unittest.TestCase):
         with patch.object(mailbox_module, "_email_cfg", return_value={
             "gmail": {
                 "enabled": True,
-                "email": "liziaicloudxm@gmail.com",
+                "email": "secondary.user@gmail.com",
                 "app_password": "abcd efgh ijkl mnop",
                 "auth_mode": "app_password",
             }
         }):
             mailbox = mailbox_module._gmail_mailbox_from_config(
-                type("Args", (), {"email": "liziaiclou.dxm+pj8@gmail.com"})()
+                type("Args", (), {"email": "sec.ondary.user+alias@gmail.com"})()
             )
 
         self.assertIsNone(mailbox)
@@ -166,20 +166,20 @@ class GmailMailboxTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             token_file = Path(tmp) / "mailbox_tokens.txt"
             token_file.write_text(
-                "gmail://migueladorno236@gmail.com---qrst uvwx yzab vfgv\n",
+                "gmail://primary.user@gmail.com---qrst uvwx yzab vfgv\n",
                 encoding="utf-8",
             )
             with patch.object(mailbox_module, "_email_cfg", return_value={
                 "token_file": str(token_file),
                 "gmail": {
                     "enabled": True,
-                    "email": "liziaicloudxm@gmail.com",
+                    "email": "secondary.user@gmail.com",
                     "app_password": "abcd efgh ijkl tnht",
                     "auth_mode": "app_password",
                 },
             }):
                 mailbox = mailbox_module._gmail_mailbox_from_config(
-                    type("Args", (), {"email": "mi.g.u.el.ad.o.rno236+43wqm@gmail.com"})()
+                    type("Args", (), {"email": "p.r.i.m.a.r.y.user+alias@gmail.com"})()
                 )
 
         self.assertIsNone(mailbox)

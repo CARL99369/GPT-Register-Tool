@@ -43,6 +43,13 @@ _ARKASM_HOST = "icloud.arkasm.cn"
 _FLYSMS_HOST = "flysms.xyz"
 _FLYSMS_PICKUP_PATH = "/icloud/pickup"
 _FLYSMS_TOKEN_RE = re.compile(r"^tok_[A-Za-z0-9_-]+$")
+_SCRIPT_HTML_ASSIGN_RE = re.compile(
+    r'''(?is)\b(?:var|let|const)\s+(?:htmlContent|emailHtml|bodyHtml)\s*=\s*("(?:\\.|[^"\\])*")'''
+)
+_CN_DATE_RE = re.compile(
+    r"(?<!\d)(\d{4})年(\d{1,2})月(\d{1,2})日"
+    r"(?:[^\d]{0,12}(\d{1,2}):(\d{2})(?::(\d{2}))?)?"
+)
 
 
 class UrlHtmlMailboxError(RuntimeError):
@@ -225,8 +232,13 @@ def _message_date(node, text):
     if not match:
         match = _DATE_RE.search(text)
     if not match:
-        return ""
-    year, month, day, hour, minute, second, timezone = match.groups()
+        chinese_match = _CN_DATE_RE.search(date_text or text)
+        if not chinese_match:
+            return ""
+        year, month, day, hour, minute, second = chinese_match.groups()
+        timezone = ""
+    else:
+        year, month, day, hour, minute, second, timezone = match.groups()
     value = (
         f"{int(year):04d}-{int(month):02d}-{int(day):02d}T"
         f"{int(hour or 0):02d}:{int(minute or 0):02d}:{int(second or 0):02d}"
@@ -290,6 +302,30 @@ def _fallback_context_messages(text, mailbox_email):
     return messages
 
 
+def _script_assigned_html_documents(html):
+    documents = []
+    for match in _SCRIPT_HTML_ASSIGN_RE.finditer(str(html or "")):
+        try:
+            document = json.loads(match.group(1))
+        except (TypeError, ValueError):
+            continue
+        if isinstance(document, str) and "<" in document:
+            documents.append(document)
+    return documents
+
+
+def _parse_html_document_messages(html, mailbox_email, limit=25):
+    root = _parse_html_tree(html)
+    messages = []
+    for node in _semantic_message_containers(root):
+        message = _message_from_text(_visible_text(node), mailbox_email, node=node)
+        if message:
+            messages.append(message)
+    if not messages:
+        messages = _fallback_context_messages(_visible_text(root), mailbox_email)
+    return messages
+
+
 def _plus_alias_base(value):
     email = str(value or "").strip().lower()
     if "@" not in email:
@@ -302,14 +338,20 @@ def _plus_alias_base(value):
 
 
 def parse_url_html_messages(html, mailbox_email, limit=25):
-    root = _parse_html_tree(str(html or ""))
-    messages = []
-    for node in _semantic_message_containers(root):
-        message = _message_from_text(_visible_text(node), mailbox_email, node=node)
-        if message:
-            messages.append(message)
+    raw_html = str(html or "")
+    outer_root = _parse_html_tree(raw_html)
+    outer_received = _message_date(outer_root, _visible_text(outer_root))
+    messages = _parse_html_document_messages(raw_html, mailbox_email, limit=limit)
     if not messages:
-        messages = _fallback_context_messages(_visible_text(root), mailbox_email)
+        for embedded_html in _script_assigned_html_documents(raw_html):
+            messages = _parse_html_document_messages(embedded_html, mailbox_email, limit=limit)
+            if messages:
+                break
+
+    if outer_received:
+        for message in messages:
+            if not message.get("receivedDateTime"):
+                message["receivedDateTime"] = outer_received
 
     unique = []
     seen = set()

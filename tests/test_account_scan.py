@@ -92,8 +92,8 @@ class AccountScanTests(unittest.TestCase):
 
     def test_gmail_scan_lane_key_keeps_exact_address(self):
         self.assertEqual(
-            account_scan._gmail_scan_lane_key("M.i.g.u.EL.A.D.orno236+qrzzsw@gmail.com"),
-            "m.i.g.u.el.a.d.orno236+qrzzsw@gmail.com",
+            account_scan._gmail_scan_lane_key("P.r.i.m.a.r.y.User+alias@gmail.com"),
+            "p.r.i.m.a.r.y.user+alias@gmail.com",
         )
 
     def test_persist_scan_clears_workspace_id_for_free_account(self):

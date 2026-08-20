@@ -678,6 +678,17 @@ namespace SmsWorkbench
             return access.Length > 0 ? "已注册" : "待处理";
         }
 
+        private string LatestOAuthOperationStatus(Dictionary<string, object> data)
+        {
+            if (!TryGetMap(data, "response", out Dictionary<string, object> response)
+                || !TryGetMap(response, "codex_oauth", out Dictionary<string, object> oauth))
+            {
+                return "";
+            }
+
+            return OAuthOperationState.Display(GetString(oauth, "ok"), GetString(oauth, "error"));
+        }
+
         private bool LooksAtInvalidError(string error)
         {
             string text = (error ?? "").ToLowerInvariant();

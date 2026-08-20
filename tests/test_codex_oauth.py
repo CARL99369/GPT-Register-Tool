@@ -115,7 +115,7 @@ class CodexOauthTests(unittest.TestCase):
 
     def test_mailbox_from_data_falls_back_to_config_for_gmail(self):
         fallback = codex_oauth.MailboxAccount(
-            email="liziaicloudxm@gmail.com",
+            email="secondary.user@gmail.com",
             provider="gmail",
             password="abcd efgh ijkl mnop",
             auth_mode="app_password",
@@ -123,7 +123,7 @@ class CodexOauthTests(unittest.TestCase):
         )
         with patch("sms_tool.codex_oauth.mailbox_has_inbox_credentials", side_effect=[False, True]), \
              patch("sms_tool.mailbox._mailbox_from_config", return_value=fallback) as from_config:
-            result = codex_oauth._mailbox_from_data({"email": "liziaicloudxm@gmail.com"})
+            result = codex_oauth._mailbox_from_data({"email": "secondary.user@gmail.com"})
 
         self.assertIs(result, fallback)
         from_config.assert_called_once()
@@ -315,6 +315,10 @@ class CodexOauthTests(unittest.TestCase):
         with patch("sms_tool.codex_oauth.load_cached_sentinel", return_value={}), \
              patch("sms_tool.codex_oauth.attach_sentinel"), \
              patch("sms_tool.codex_oauth.secrets.token_hex", return_value="fresh-device-id"), \
+             patch("sms_tool.codex_oauth._ensure_oauth_sentinel", return_value={
+                 "sentinel_token": "fresh-sentinel",
+                 "cookie_str": "",
+             }), \
              patch("sms_tool.codex_oauth._new_oauth_request", return_value=replacement_oauth), \
              patch("sms_tool.codex_oauth._next_url", return_value="https://auth.openai.com/email-verification"), \
              patch("sms_tool.codex_oauth._follow_redirects", return_value=(None, "https://auth.openai.com/email-verification")) as follow, \
@@ -342,6 +346,127 @@ class CodexOauthTests(unittest.TestCase):
         self.assertIn(".openai.com", cleared_domains)
         device_ids = [call.args[1] for call in session.cookies.set.call_args_list if call.args[0] == "oai-did"]
         self.assertEqual(device_ids, ["did", "fresh-device-id"])
+
+    def test_authorize_continue_invalid_state_restarts_before_protocol_stages(self):
+        session = Mock()
+        session.cookies.set = Mock()
+        session.cookies.clear = Mock()
+        session.post.side_effect = [
+            Mock(
+                status_code=409,
+                text='{"error":{"code":"invalid_state","message":"Your sign-in session is no longer valid."}}',
+                headers={},
+            ),
+            Mock(status_code=200, text="{}", headers={}),
+        ]
+
+        with patch("sms_tool.codex_oauth.load_cached_sentinel", return_value={}), \
+             patch("sms_tool.codex_oauth.attach_sentinel"), \
+             patch("sms_tool.codex_oauth._ensure_oauth_sentinel", return_value={
+                 "sentinel_token": "fresh-sentinel",
+                 "cookie_str": "",
+             }) as ensure, \
+             patch("sms_tool.codex_oauth._new_oauth_request", return_value={
+                 "auth_url": "https://auth.openai.com/oauth/authorize?state=fresh",
+                 "state": "fresh",
+                 "code_verifier": "fresh-verifier",
+                 "redirect_uri": "http://localhost",
+             }), \
+             patch("sms_tool.codex_oauth._next_url", return_value="https://auth.openai.com/email-verification"), \
+             patch("sms_tool.codex_oauth._follow_redirects", return_value=(None, "https://auth.openai.com/email-verification")), \
+             patch("sms_tool.codex_oauth._run_protocol_login_stages", return_value={
+                 "ok": True,
+                 "tokens": {"access_token": "at", "refresh_token": "rt"},
+             }) as stages:
+            result = codex_oauth._login_and_exchange(
+                session=session,
+                oauth={
+                    "auth_url": "https://auth.openai.com/oauth/authorize?state=old",
+                    "state": "old",
+                    "code_verifier": "old-verifier",
+                    "redirect_uri": "http://localhost",
+                },
+                email="user@example.com",
+                data={"device_id": "did"},
+                current_url="https://auth.openai.com/log-in",
+                force_email_otp_login=True,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(session.post.call_count, 2)
+        self.assertEqual(stages.call_count, 1)
+        self.assertGreaterEqual(ensure.call_count, 1)
+
+    def test_authorize_continue_cloudflare_challenge_retries_with_fresh_sentinel(self):
+        session = Mock()
+        session.cookies.set = Mock()
+        session.cookies.clear = Mock()
+        session.post.side_effect = [
+            Mock(
+                status_code=403,
+                text="<!doctype html><title>Just a moment...</title><div>cf-chl</div>",
+                headers={},
+            ),
+            Mock(status_code=200, text="{}", headers={}),
+        ]
+
+        with patch("sms_tool.codex_oauth.load_cached_sentinel", return_value={}), \
+             patch("sms_tool.codex_oauth.attach_sentinel"), \
+             patch("sms_tool.codex_oauth._ensure_oauth_sentinel", return_value={
+                 "sentinel_token": "fresh-sentinel",
+                 "cookie_str": "",
+             }) as ensure, \
+             patch("sms_tool.codex_oauth._new_oauth_request", return_value={
+                 "auth_url": "https://auth.openai.com/oauth/authorize?state=fresh",
+                 "state": "fresh",
+                 "code_verifier": "fresh-verifier",
+                 "redirect_uri": "http://localhost",
+             }), \
+             patch("sms_tool.codex_oauth._next_url", return_value="https://auth.openai.com/email-verification"), \
+             patch("sms_tool.codex_oauth._follow_redirects", return_value=(None, "https://auth.openai.com/email-verification")), \
+             patch("sms_tool.codex_oauth._run_protocol_login_stages", return_value={
+                 "ok": True,
+                 "tokens": {"access_token": "at", "refresh_token": "rt"},
+             }), \
+             patch("sms_tool.codex_oauth.time.sleep") as sleep:
+            result = codex_oauth._login_and_exchange(
+                session=session,
+                oauth={
+                    "auth_url": "https://auth.openai.com/oauth/authorize?state=old",
+                    "state": "old",
+                    "code_verifier": "old-verifier",
+                    "redirect_uri": "http://localhost",
+                },
+                email="user@example.com",
+                data={"device_id": "did"},
+                current_url="https://auth.openai.com/log-in",
+                force_email_otp_login=True,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(session.post.call_count, 2)
+        self.assertTrue(any(call.kwargs.get("force_fresh") for call in ensure.call_args_list))
+        sleep.assert_called_once()
+
+    def test_authorize_continue_retry_classification_excludes_account_deactivation(self):
+        self.assertTrue(
+            codex_oauth._is_transient_authorize_continue_response(
+                502,
+                '{"error":{"type":"cf_bad_gateway"}}',
+            )
+        )
+        self.assertTrue(
+            codex_oauth._is_transient_authorize_continue_response(
+                403,
+                "<!doctype html><title>Just a moment...</title>",
+            )
+        )
+        self.assertFalse(
+            codex_oauth._is_transient_authorize_continue_response(
+                403,
+                '{"error":{"code":"account_deactivated","message":"Account has been deactivated"}}',
+            )
+        )
 
     def test_password_login_uses_password_verify_endpoint(self):
         session = Mock()
@@ -866,6 +991,22 @@ class CodexOauthTests(unittest.TestCase):
         self.assertEqual(result["phone"], "+233555123456")
         self.assertEqual(result["phone_attempt"], phone_attempt)
         upsert.assert_called_once()
+
+    def test_saved_oauth_result_records_latest_operation_status_without_phone(self):
+        with TemporaryDirectory() as tmp, \
+             patch("sms_tool.codex_oauth.upsert_account") as upsert:
+            json_path = f"{tmp}/session.json"
+            codex_oauth._save_oauth_tokens(
+                {"email": "user@example.com", "access_token": "old-at"},
+                json_path,
+                {"access_token": "at", "refresh_token": "rt"},
+                "user@example.com",
+                "codex_oauth_pkce",
+                result={"ok": True, "mode": "codex_oauth_pkce"},
+            )
+
+        saved = upsert.call_args.args[0]
+        self.assertEqual(saved["response"]["codex_oauth"]["ok"], True)
 
 
 if __name__ == "__main__":

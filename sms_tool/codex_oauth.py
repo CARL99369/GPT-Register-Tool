@@ -16,6 +16,7 @@ from .auth_headers import auth_impersonate, openai_auth_headers_lower, select_au
 from .http_client import request_with_retry
 from .mailbox import MailboxAccount, MailboxTokenExpiredError, _poll_email_otp, mailbox_has_inbox_credentials
 from . import mailbox_gmail
+from .commands.helpers import public_oauth_result
 from .storage import upsert_account
 from .totp import generate_totp
 
@@ -27,7 +28,7 @@ REDIRECT_URI = "http://localhost:1455/auth/callback"
 SCOPE = "openid profile email offline_access api.connectors.read api.connectors.invoke"
 ORIGINATOR = "codex_cli_rs"
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/110.0.0.0 Safari/537.36"
-LOGIN_EMAIL_OTP_SUBJECT_KEYWORD = "login code|登录代码|验证码|临时登录代码|临时验证码|ログインコード|認証コード|一時的な認証コード|登入代碼|驗證碼|로그인 코드|인증 코드"
+LOGIN_EMAIL_OTP_SUBJECT_KEYWORD = "login code|verification code|登录代码|验证码|临时登录代码|临时验证码|ログインコード|認証コード|一時的な認証コード|登入代碼|驗證碼|로그인 코드|인증 코드"
 
 
 def refresh_codex_oauth_session(
@@ -128,7 +129,7 @@ def collect_codex_oauth_tokens(
         return {"ok": False, "mode": "codex_oauth_pkce", "error": str(exc)}
 
 
-def _ensure_oauth_sentinel(device_id, proxy=None):
+def _ensure_oauth_sentinel(device_id, proxy=None, force_fresh=False):
     from .sentinel_tokens import (
         _extract_sentinel_http,
         _extract_sentinel_quickjs,
@@ -137,7 +138,7 @@ def _ensure_oauth_sentinel(device_id, proxy=None):
     )
 
     did = str(device_id or "").strip()
-    cached = _get_cached_sentinel()
+    cached = _get_cached_sentinel(force_fresh=force_fresh)
     if cached and _sentinel_device_id(cached) == did:
         return cached
 
@@ -161,18 +162,34 @@ def _login_and_exchange(
     phone_pool=None,
     phone_probe_only=False,
 ):
-    max_restarts = 2
+    max_restarts = _authorize_continue_max_restarts()
     for restart_attempt in range(max_restarts + 1):
         did = (
             secrets.token_hex(16)
             if restart_attempt > 0
             else str(data.get("device_id") or "").strip() or _cookie_value(session, "oai-did") or secrets.token_hex(16)
         )
+        if restart_attempt > 0:
+            data["device_id"] = did
         try:
             session.cookies.set("oai-did", did, domain="auth.openai.com", path="/")
         except Exception:
             pass
-        sentinel = load_cached_sentinel()
+        if restart_attempt > 0:
+            sentinel = _ensure_oauth_sentinel(
+                device_id=did,
+                proxy=proxy,
+                force_fresh=True,
+            )
+            if not sentinel:
+                return {
+                    "ok": False,
+                    "mode": "codex_oauth_pkce",
+                    "error": "oauth_sentinel_refresh_failed",
+                }
+            import_cookie_header(session, sentinel.get("cookie_str", ""), "auth.openai.com")
+        else:
+            sentinel = load_cached_sentinel()
         headers = _oai_headers(did, {"Referer": current_url or AUTH_URL, "content-type": "application/json"})
         attach_sentinel(headers, sentinel)
         otp_issued_after_unix = int(time.time())
@@ -188,36 +205,55 @@ def _login_and_exchange(
             allow_redirects=False,
         )
         if start_resp.status_code != 200:
-            return {
-                "ok": False,
-                "mode": "codex_oauth_pkce",
-                "error": f"authorize_continue_failed:{start_resp.status_code}",
-                "body": start_resp.text[:300],
-            }
-        next_url = _next_url(start_resp)
-        _, current_url = _follow_redirects(session, next_url, proxy=proxy)
-        if _has_callback_code(current_url):
-            return {"ok": True, "tokens": _exchange_callback(current_url, oauth, proxy=proxy)}
+            body = str(start_resp.text or "")
+            invalid_state = _is_invalid_auth_state_response(start_resp.status_code, body)
+            transient = _is_transient_authorize_continue_response(start_resp.status_code, body)
+            if not (invalid_state or transient) or restart_attempt >= max_restarts:
+                return {
+                    "ok": False,
+                    "mode": "codex_oauth_pkce",
+                    "error": f"authorize_continue_failed:{start_resp.status_code}",
+                    "body": body[:300],
+                    "retryable": transient,
+                    "needs_session_restart": invalid_state,
+                    "needs_proxy_rotation": transient,
+                }
+            reason = "invalid session state" if invalid_state else f"transient HTTP {start_resp.status_code}"
+            print(
+                "[*] OAuth authorize/continue "
+                f"{reason}; rebuilding auth flow (attempt {restart_attempt + 1}/{max_restarts})"
+            )
+            if transient:
+                delay = _authorize_continue_retry_delay(start_resp, restart_attempt)
+                if delay:
+                    time.sleep(delay)
+        else:
+            next_url = _next_url(start_resp)
+            _, current_url = _follow_redirects(session, next_url, proxy=proxy)
+            if _has_callback_code(current_url):
+                return {"ok": True, "tokens": _exchange_callback(current_url, oauth, proxy=proxy)}
 
-        result = _run_protocol_login_stages(
-            session=session,
-            oauth=oauth,
-            email=email,
-            data=data,
-            did=did,
-            current_url=current_url,
-            proxy=proxy,
-            timeout=timeout,
-            force_email_otp_login=force_email_otp_login,
-            phone_pool=phone_pool,
-            phone_probe_only=phone_probe_only,
-            initial_otp_requested=True,
-            otp_issued_after_unix=otp_issued_after_unix,
-        )
-        if not result.get("needs_session_restart") or restart_attempt >= max_restarts:
-            return result
-        print(f"[*] Session state invalid, restarting auth flow (attempt {restart_attempt + 1}/{max_restarts})")
+            result = _run_protocol_login_stages(
+                session=session,
+                oauth=oauth,
+                email=email,
+                data=data,
+                did=did,
+                current_url=current_url,
+                proxy=proxy,
+                timeout=timeout,
+                force_email_otp_login=force_email_otp_login,
+                phone_pool=phone_pool,
+                phone_probe_only=phone_probe_only,
+                initial_otp_requested=True,
+                otp_issued_after_unix=otp_issued_after_unix,
+            )
+            if not result.get("needs_session_restart") or restart_attempt >= max_restarts:
+                return result
+            print(f"[*] Session state invalid, restarting auth flow (attempt {restart_attempt + 1}/{max_restarts})")
+
         _clear_auth_session_cookies(session)
+        select_auth_fingerprint(rotate=True)
         try:
             oauth = _new_oauth_request()
             _, current_url = _follow_redirects(session, oauth["auth_url"], proxy=proxy)
@@ -1201,19 +1237,14 @@ def _save_oauth_tokens(data, json_path, tokens, email, mode, result=None):
         "updated_at": now,
     }
     result = result if isinstance(result, dict) else {}
+    response = refreshed.get("response") if isinstance(refreshed.get("response"), dict) else {}
+    response["codex_oauth"] = public_oauth_result(result)
+    response["codex_oauth"]["updated_at"] = now
+    refreshed["response"] = response
     phone_attempt = result.get("phone_attempt") if isinstance(result.get("phone_attempt"), dict) else {}
     if phone_attempt:
         refreshed["phone"] = phone_attempt.get("phone", refreshed.get("phone", ""))
-        response = refreshed.get("response") if isinstance(refreshed.get("response"), dict) else {}
         response["phone_verification"] = phone_attempt
-        response["codex_oauth"] = {
-            "ok": True,
-            "mode": mode,
-            "has_access_token": bool(tokens.get("access_token")),
-            "has_refresh_token": bool(tokens.get("refresh_token")),
-            "phone_verified": bool(phone_attempt.get("ok")),
-        }
-        refreshed["response"] = response
     if expires_in:
         refreshed["oauth_expires_at"] = _iso_utc(now + expires_in)
     if json_path:
@@ -1403,6 +1434,43 @@ def _is_invalid_auth_state_response(status_code, text):
         return False
     body = str(text or "").lower()
     return "invalid_state" in body or "sign-in session is no longer valid" in body
+
+
+def _is_transient_authorize_continue_response(status_code, text):
+    status = int(status_code or 0)
+    if status in {408, 425, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524}:
+        return True
+    if status != 403 or _is_account_deactivated_response(status, text):
+        return False
+    body = str(text or "").lower()
+    return any(marker in body for marker in (
+        "just a moment",
+        "cf-chl",
+        "challenge-platform",
+        "cloudflare",
+        "attention required",
+    ))
+
+
+def _authorize_continue_max_restarts():
+    try:
+        attempts = int(_codex_oauth_cfg().get("authorize_retry_attempts", 3) or 3)
+    except (TypeError, ValueError):
+        attempts = 3
+    return max(0, min(attempts, 5) - 1)
+
+
+def _authorize_continue_retry_delay(response, restart_attempt):
+    try:
+        configured = float(_codex_oauth_cfg().get("authorize_retry_delay_seconds", 2) or 2)
+    except (TypeError, ValueError):
+        configured = 2.0
+    try:
+        retry_after = float((response.headers or {}).get("Retry-After") or 0)
+    except (AttributeError, TypeError, ValueError):
+        retry_after = 0.0
+    exponential = max(0.0, configured) * (2 ** max(0, int(restart_attempt or 0)))
+    return min(max(exponential, retry_after), 30.0)
 
 
 def _otp_response_detail(response):

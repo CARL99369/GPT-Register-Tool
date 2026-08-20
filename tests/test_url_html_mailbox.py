@@ -27,18 +27,18 @@ def _otp(mailbox, message):
     ("line", "expected_email", "expected_url"),
     [
         (
-            "35_dells.search@icloud.com----------https://mail.example.test/share/one",
-            "35_dells.search@icloud.com",
+            "sample.one@icloud.com----------https://mail.example.test/share/one",
+            "sample.one@icloud.com",
             "https://mail.example.test/share/one",
         ),
         (
-            "yachts.motors_2w@icloud.com-------https://mail.example.test/share/two",
-            "yachts.motors_2w@icloud.com",
+            "sample.two@icloud.com-------https://mail.example.test/share/two",
+            "sample.two@icloud.com",
             "https://mail.example.test/share/two",
         ),
         (
-            "wonder.aspects_6e@icloud.com------https://mail.example.test/share/three",
-            "wonder.aspects_6e@icloud.com",
+            "sample.three@icloud.com------https://mail.example.test/share/three",
+            "sample.three@icloud.com",
             "https://mail.example.test/share/three",
         ),
     ],
@@ -197,6 +197,23 @@ def test_parses_otp_from_iframe_srcdoc_mail_body():
     messages = parse_url_html_messages(html, mailbox.email)
 
     assert any(_otp(mailbox, message) == "519317" for message in messages)
+
+
+def test_parses_otp_from_javascript_assigned_iframe_srcdoc():
+    html = r'''
+    <div>接收时间：2026年08月17日 11:47:46 (北京时间)</div>
+    <div class="email-frame"><iframe id="emailFrame"></iframe></div>
+    <script>
+      var htmlContent = "<html>\\r\\n<body><p>Your temporary ChatGPT verification code: 446387</p></body></html>";
+      frame.srcdoc = htmlContent;
+    </script>
+    '''
+    mailbox = MailboxAccount(email="user@icloud.com", provider="url_html")
+
+    messages = parse_url_html_messages(html, mailbox.email)
+
+    assert any(_otp(mailbox, message) == "446387" for message in messages)
+    assert messages[0]["receivedDateTime"].startswith("2026-08-17T11:47:46")
 
 
 class FakeResponse:

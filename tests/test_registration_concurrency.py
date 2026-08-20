@@ -280,14 +280,14 @@ class RegistrationConcurrencyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "mailboxes.txt"
             path.write_text(
-                "CierraRiste7566@+oai01hotmail.com----pw----client----refresh\n",
+                "TestAccount7566@+oai01hotmail.com----pw----client----refresh\n",
                 encoding="utf-8",
             )
 
             records = _parse_chatai_mailbox_file(path)
 
         self.assertEqual(len(records), 1)
-        self.assertEqual(records[0].email, "cierrariste7566+oai01@hotmail.com")
+        self.assertEqual(records[0].email, "testaccount7566+oai01@hotmail.com")
 
     def test_chatai_parser_accepts_cfworker_lines_for_selected_temp_file(self):
         with tempfile.TemporaryDirectory() as tmp:

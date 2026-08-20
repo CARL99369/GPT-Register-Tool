@@ -459,6 +459,7 @@ namespace SmsWorkbench
                         RegistrationCountry = data.TryGetValue("registration_country", out string registrationCountry) ? registrationCountry : "",
                         QuotaStatus = GetQuotaStatus(rawData),
                         Status = DisplayAccountStatus(status, paypalOk, access, error, paypalStatus, refreshTokenStatus, importedStatus),
+                        LatestOperationStatus = LatestOAuthOperationStatus(rawData),
                         PayPalStatus = DisplayPayPalStatus(paypalStatus, paypalOk, paypalUrl, paymentMethod),
                         PayPalAmount = paypalAmount,
                         RefreshTokenStatus = DisplayRtStatus(refreshTokenStatus),
@@ -533,6 +534,7 @@ namespace SmsWorkbench
                             Status = importedStatus.Length > 0
                                 ? importedStatus
                                 : DisplayAccountStatus(GetString(data, "status"), "", access, GetString(data, "error"), paypalStatus, refreshTokenStatus, importedStatus),
+                            LatestOperationStatus = LatestOAuthOperationStatus(data),
                             PayPalStatus = paypalStatus,
                             PayPalAmount = paypalAmount,
                             RefreshTokenStatus = DisplayRtStatus(refreshTokenStatus),

@@ -78,6 +78,23 @@ class EmailOtpFilteringTests(unittest.TestCase):
 
         self.assertEqual(candidate["otp"], "123456")
 
+    def test_login_keyword_accepts_api798_temporary_verification_subject(self):
+        mailbox = MailboxAccount(email="target@icloud.com", provider="url_html")
+        message = self._message("Enter this temporary verification code to continue:")
+        message["toRecipients"] = []
+        message["bodyPreview"] = (
+            "Enter this temporary verification code to continue:\n123456"
+        )
+
+        candidate = _email_otp_candidate(
+            mailbox,
+            message,
+            keyword=LOGIN_EMAIL_OTP_SUBJECT_KEYWORD,
+            issued_after_unix=0,
+        )
+
+        self.assertEqual(candidate["otp"], "123456")
+
     def test_cfworker_registration_otp_issued_after_has_small_grace(self):
         mailbox = MailboxAccount(email="target@edu.liziai.cloud", provider="cfworker")
         adjusted = _provider_otp_issued_after(mailbox, 1779934004)
@@ -183,14 +200,14 @@ class EmailOtpFilteringTests(unittest.TestCase):
         self.assertEqual(code, "169441")
 
     def test_gmail_alias_recipient_does_not_match_primary_mailbox(self):
-        mailbox = MailboxAccount(email="migueladorno236@gmail.com", provider="gmail")
+        mailbox = MailboxAccount(email="primary.user@gmail.com", provider="gmail")
         message = {
             "id": "msg-gmail-1",
             "receivedDateTime": "2026-07-05T10:00:00Z",
             "subject": "Your temporary ChatGPT verification code",
             "bodyPreview": "Your code is 654321.",
             "body": {"content": ""},
-            "toRecipients": [{"emailAddress": {"address": "M.i.g.u.EL.A.D.orno236+qrzzsw@gmail.com"}}],
+            "toRecipients": [{"emailAddress": {"address": "P.r.i.m.a.r.y.User+alias@gmail.com"}}],
         }
 
         candidate = _email_otp_candidate(
@@ -203,7 +220,7 @@ class EmailOtpFilteringTests(unittest.TestCase):
         self.assertIsNone(candidate)
 
     def test_gmail_googlemail_plus_recipient_does_not_match(self):
-        mailbox = MailboxAccount(email="liziaicloudxm@gmail.com", provider="gmail")
+        mailbox = MailboxAccount(email="secondary.user@gmail.com", provider="gmail")
         message = {
             "id": "msg-gmail-2",
             "receivedDateTime": "2026-07-05T10:00:01Z",
@@ -211,7 +228,7 @@ class EmailOtpFilteringTests(unittest.TestCase):
             "bodyPreview": "Your code is 123456.",
             "body": {"content": ""},
             "internetMessageHeaders": [
-                {"name": "Delivered-To", "value": "li.zi.aicl.oudxm+ri1ug@googlemail.com"},
+                {"name": "Delivered-To", "value": "sec.ondary.user+alias@googlemail.com"},
             ],
         }
 

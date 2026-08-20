@@ -263,6 +263,8 @@
   "codex_oauth": {
     "allow_passwordless_takeover": false,
     "auto_phone_verification": false,
+    "authorize_retry_attempts": 3,
+    "authorize_retry_delay_seconds": 2,
     "require_registration_refresh_token": true,
     "require_registration_phone_verification": true,
     "registration_timeout": 180

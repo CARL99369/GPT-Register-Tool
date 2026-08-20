@@ -214,7 +214,7 @@ class StorageDedupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "accounts.sqlite3"
             with patch.object(storage, "database_path", return_value=db_path):
-                self.assertTrue(storage.upsert_account({"email": "CierraRiste7566@+oai01hotmail.com", "success": False}))
+                self.assertTrue(storage.upsert_account({"email": "TestAccount7566@+oai01hotmail.com", "success": False}))
 
                 conn = storage._connect()
                 try:
@@ -222,7 +222,7 @@ class StorageDedupTests(unittest.TestCase):
                 finally:
                     conn.close()
 
-        self.assertEqual(row["email"], "cierrariste7566+oai01@hotmail.com")
+        self.assertEqual(row["email"], "testaccount7566+oai01@hotmail.com")
 
     def test_upsert_reuses_preexisting_misplaced_alias_plus_row(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -237,14 +237,14 @@ class StorageDedupTests(unittest.TestCase):
                         INSERT INTO accounts (email, success, created_at, updated_at)
                         VALUES (?, ?, ?, ?)
                         """,
-                        ("cierrariste7566@+oai01hotmail.com", 0, now, now),
+                        ("testaccount7566@+oai01hotmail.com", 0, now, now),
                     )
                     conn.commit()
                 finally:
                     conn.close()
 
                 self.assertTrue(storage.upsert_account({
-                    "email": "cierrariste7566+oai01@hotmail.com",
+                    "email": "testaccount7566+oai01@hotmail.com",
                     "success": True,
                     "access_token": "tok",
                 }))
@@ -256,7 +256,7 @@ class StorageDedupTests(unittest.TestCase):
                     conn.close()
 
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["email"], "cierrariste7566+oai01@hotmail.com")
+        self.assertEqual(rows[0]["email"], "testaccount7566+oai01@hotmail.com")
         self.assertEqual(rows[0]["success"], 1)
         self.assertEqual(rows[0]["access_token"], "tok")
 

@@ -2,7 +2,6 @@ import unittest
 from unittest.mock import patch
 
 from sms_tool import otp_strategy, registration
-from sms_tool.auth_headers import AUTH_IMPERSONATE
 
 
 class FakeResponse:
@@ -47,7 +46,8 @@ class RegistrationOtpStrategyTests(unittest.TestCase):
             seen.update(kwargs)
             return FakeResponse(200)
 
-        with patch.object(otp_strategy, "request_with_retry", side_effect=fake_request):
+        with patch.object(otp_strategy, "auth_impersonate", return_value="chrome-test"), \
+             patch.object(otp_strategy, "request_with_retry", side_effect=fake_request):
             otp_strategy.send_registration_email_otp(
                 session=object(),
                 auth_base="https://auth.openai.com",
@@ -56,7 +56,7 @@ class RegistrationOtpStrategyTests(unittest.TestCase):
                 mode="passwordless",
             )
 
-        self.assertEqual(seen["impersonate"], AUTH_IMPERSONATE)
+        self.assertEqual(seen["impersonate"], "chrome-test")
 
 
 if __name__ == "__main__":

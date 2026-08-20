@@ -273,6 +273,7 @@ namespace SmsWorkbench
         public string Quota7dRemaining { get; set; } = "";
         public string Quota7dPercent { get; set; } = "";
         public string Status { get; set; } = "";
+        public string LatestOperationStatus { get; set; } = "";
         public string PayPalStatus { get; set; } = "";
         public string PayPalAmount { get; set; } = "";
         public string RefreshTokenStatus { get; set; } = "";
@@ -479,12 +480,14 @@ namespace SmsWorkbench
             if (s.Length == 0) return "neutral";
 
             // Success states (green)
+            if (s.Contains("\u6210\u529f")) return "success";
             if (s.Contains("✅") || s.Contains("完成") || s.Contains("已注册")
                 || s.Contains("已获取") || s.Contains("已导入") || s.Contains("K12已进入")
                 || s.Contains("PM已创建"))
                 return "success";
 
             // Danger states (red)
+            if (s.Contains("\u5931\u8d25")) return "danger";
             if (s.Contains("失败") || s.Contains("失效") || s.Contains("掉号")
                 || s.Contains("异常") || s.Contains("无RT") || s.Contains("缺失")
                 || s.Contains("未获取") || s.Contains("K12未切换") || s.Contains("K12已退出"))

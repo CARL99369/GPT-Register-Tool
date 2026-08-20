@@ -56,7 +56,7 @@ from .registration_progress import registration_stage, track_registration
 from .utils import _generate_password, _print_timings, _random_birthdate, _random_name, _tick, _timing_summary, _tock, _tl
 
 REGISTRATION_EMAIL_OTP_SUBJECT_KEYWORD = "verification code"
-LOGIN_EMAIL_OTP_SUBJECT_KEYWORD = "login code|登录代码|验证码|临时登录代码|临时验证码|ログインコード|認証コード|一時的な認証コード|登入代碼|驗證碼|로그인 코드|인증 코드"
+LOGIN_EMAIL_OTP_SUBJECT_KEYWORD = "login code|verification code|登录代码|验证码|临时登录代码|临时验证码|ログインコード|認証コード|一時的な認証コード|登入代碼|驗證碼|로그인 코드|인증 코드"
 REGISTRATION_EMAIL_OTP_SUBJECT_KEYWORDS = f"{REGISTRATION_EMAIL_OTP_SUBJECT_KEYWORD}|{LOGIN_EMAIL_OTP_SUBJECT_KEYWORD}"
 
 # ==========================================

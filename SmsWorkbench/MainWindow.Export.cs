@@ -54,6 +54,91 @@ namespace SmsWorkbench
             ExportAccountsConvertedJson(rows, format);
         }
 
+        private void ExportUnusedMailboxes_Click(object sender, RoutedEventArgs e)
+        {
+            var rows = UnusedMailboxExportCandidateRows();
+            if (rows.Count == 0)
+            {
+                ShowThemedInfoDialog("导出邮箱", "没有找到可导出的未使用邮箱。请先导入邮箱池，或勾选仍未注册的邮箱记录。");
+                return;
+            }
+
+            var exportRows = new List<(string Email, string Line)>();
+            int unresolved = 0;
+            foreach (PoolRow row in rows)
+            {
+                string line = ResolveUnusedMailboxExportLine(row);
+                if (line.Length == 0)
+                {
+                    unresolved++;
+                    continue;
+                }
+                exportRows.Add(((row.Identifier ?? "").Trim(), line));
+            }
+
+            IReadOnlyList<string> lines = MailboxUnusedExport.CollectExportLines(exportRows, out int skipped);
+            skipped += unresolved;
+            if (lines.Count == 0)
+            {
+                ShowThemedInfoDialog("导出邮箱", "没有找到可导出的邮箱原始记录。记录需包含可重新导入的邮箱行（如 Chatai / Graph / ReMail / Gmail / CFWorker / URL HTML）。");
+                return;
+            }
+
+            string outputDir = Path.Combine(rootDir, "runtime");
+            Directory.CreateDirectory(outputDir);
+            string outputPath = Path.Combine(outputDir, "mailbox-unused-" + DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".txt");
+            File.WriteAllLines(outputPath, lines, new UTF8Encoding(false));
+            Log("Unused mailbox export wrote " + lines.Count + " line(s), skipped " + skipped + ": " + outputPath);
+            ShowExportCompleteDialog(
+                outputPath,
+                lines.Count,
+                skipped,
+                "未使用邮箱 TXT",
+                "保留原始邮箱导入行，可直接再次导入或用于注册；已注册/已有 AT 的账号默认跳过",
+                dialogTitle: "导出邮箱");
+        }
+
+        private List<PoolRow> UnusedMailboxExportCandidateRows()
+        {
+            var selected = SelectedRowsOrCurrent().Where(IsUnusedMailboxExportRow).ToList();
+            if (selected.Count > 0) return selected;
+
+            var filtered = allRows.Where(FilterRow).Where(IsUnusedMailboxExportRow).ToList();
+            if (filtered.Count > 0) return filtered;
+
+            return allRows.Where(IsUnusedMailboxExportRow).ToList();
+        }
+
+        private bool IsUnusedMailboxExportRow(PoolRow row)
+        {
+            if (row == null) return false;
+            bool hasCredential = !string.IsNullOrWhiteSpace(row.MailboxLine)
+                || !string.IsNullOrWhiteSpace(row.RawRefreshToken)
+                || (!string.IsNullOrWhiteSpace(row.RawLine) && MailboxArgForLine(row.RawLine).Length > 0)
+                || IsCfWorkerRow(row)
+                || !string.IsNullOrWhiteSpace(FindMailboxLineForRow(row));
+            return MailboxUnusedExport.IsUnusedMailboxRow(
+                row.AccountType,
+                row.Status,
+                row.PayPalStatus,
+                row.HasAccessToken,
+                hasCredential);
+        }
+
+        private string ResolveUnusedMailboxExportLine(PoolRow row)
+        {
+            if (row == null) return "";
+            string resolved = MailboxUnusedExport.ResolveExportLine(
+                row.MailboxLine,
+                row.RawLine,
+                line => MailboxArgForLine(line).Length > 0 || line.StartsWith("cfworker://", StringComparison.OrdinalIgnoreCase));
+            if (resolved.Length > 0) return resolved;
+
+            string found = FindMailboxLineForRow(row);
+            if (found.Length == 0) return "";
+            return MailboxUnusedExport.ResolveExportLine(found, "", line => MailboxArgForLine(line).Length > 0 || line.StartsWith("cfworker://", StringComparison.OrdinalIgnoreCase));
+        }
+
         private List<PoolRow> ExportCandidateRows()
         {
             var rows = SelectedRowsOrCurrent();
@@ -303,11 +388,17 @@ namespace SmsWorkbench
             return "由 session_converter.py 生成的 CPA JSON；缺少 id_token 时会合成兼容字段";
         }
 
-        private void ShowExportCompleteDialog(string outputPath, int exportedCount, int skippedCount, string formatLabel, string formatDescription)
+        private void ShowExportCompleteDialog(
+            string outputPath,
+            int exportedCount,
+            int skippedCount,
+            string formatLabel,
+            string formatDescription,
+            string dialogTitle = "一键导出")
         {
             var dialog = new Window
             {
-                Title = "一键导出",
+                Title = string.IsNullOrWhiteSpace(dialogTitle) ? "一键导出" : dialogTitle.Trim(),
                 Owner = this,
                 Width = 520,
                 MinWidth = 460,
@@ -332,7 +423,7 @@ namespace SmsWorkbench
             });
             header.Children.Add(new TextBlock
             {
-                Text = "已生成账号 " + formatLabel + " 文件：" + formatDescription,
+                Text = "已生成 " + formatLabel + " 文件：" + formatDescription,
                 TextWrapping = TextWrapping.Wrap,
                 LineHeight = 20,
                 Margin = new Thickness(0, 6, 0, 0),

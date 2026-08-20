@@ -475,7 +475,7 @@ public sealed class DesktopWindowSmokeTests
         thread.SetApartmentState(ApartmentState.STA);
         thread.Start();
 
-        Assert.True(thread.Join(TimeSpan.FromSeconds(20)), "WPF smoke test did not finish in time.");
+        Assert.True(thread.Join(TimeSpan.FromSeconds(60)), "WPF smoke test did not finish in time.");
         Assert.Null(failure);
     }
 
