@@ -14,6 +14,7 @@ public sealed class MailboxLineParserTests
     [InlineData("user@hotmail.com----pw----client----refresh", "chatai", "--chatai-mailbox-file")]
     [InlineData("user@example.com----pw----JBSWY3DPEHPK3PXP---", "account_mfa", "--chatai-mailbox-file")]
     [InlineData("user@example.com----pw----JBSWY3DPEHPK3PXP----JBSWY3DPEHPK3PXP", "account_mfa", "--chatai-mailbox-file")]
+    [InlineData("user\\@example.com----pw----JBSWY3DPEHPK3PXP", "account_mfa", "--chatai-mailbox-file")]
     [InlineData("user@hotmail.com---pw---refresh", "graph", "--mailbox-file")]
     [InlineData("gmail://user@gmail.com---app-password", "gmail", "--mailbox-file")]
     [InlineData("remail://user@example.com---token---order", "remail", "--mailbox-file")]

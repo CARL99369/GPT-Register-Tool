@@ -92,7 +92,7 @@ namespace SmsWorkbench
                 }
                 if (accountMfaLine)
                 {
-                    info = new MailboxLineInfo(accountParts[0].Trim(), "account_mfa", "--chatai-mailbox-file", value);
+                    info = new MailboxLineInfo(NormalizeMailboxEmail(accountParts[0]), "account_mfa", "--chatai-mailbox-file", value);
                     return true;
                 }
             }
@@ -100,7 +100,7 @@ namespace SmsWorkbench
             if (value.Contains("----")
                 && value.Split(QuadDelimiter, StringSplitOptions.None).Length >= 4)
             {
-                string email = value.Split(QuadDelimiter, StringSplitOptions.None)[0].Trim();
+                string email = NormalizeMailboxEmail(value.Split(QuadDelimiter, StringSplitOptions.None)[0]);
                 info = new MailboxLineInfo(email, "chatai", "--chatai-mailbox-file", value);
                 return true;
             }
@@ -118,11 +118,17 @@ namespace SmsWorkbench
 
         private static bool LooksLikeEmail(string value)
         {
+            value = NormalizeMailboxEmail(value);
             int at = value.IndexOf('@');
             return at > 0
                 && at < value.Length - 3
                 && value.IndexOf('.', at) > at + 1
                 && !value.Any(char.IsWhiteSpace);
+        }
+
+        private static string NormalizeMailboxEmail(string value)
+        {
+            return (value ?? string.Empty).Trim().Replace("\\@", "@", StringComparison.Ordinal);
         }
 
         private static bool LooksLikeTotpSecret(string value)

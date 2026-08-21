@@ -99,6 +99,20 @@ def test_parse_password_totp_account_line_with_duplicate_secret(tmp_path):
     assert records[0].totp_secret == "JBSWY3DPEHPK3PXP"
 
 
+def test_parse_password_totp_account_line_accepts_escaped_at(tmp_path):
+    source = tmp_path / "accounts.txt"
+    source.write_text(
+        "user\\@example.com----account-password----JBSWY3DPEHPK3PXP\n",
+        encoding="utf-8",
+    )
+
+    records = _parse_chatai_mailbox_file(source)
+
+    assert len(records) == 1
+    assert records[0].provider == "account_mfa"
+    assert records[0].email == "user@example.com"
+
+
 def test_parses_details_mail_card():
     html = """
     <article class="mail-card"><details open>

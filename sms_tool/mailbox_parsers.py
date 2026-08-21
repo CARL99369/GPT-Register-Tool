@@ -37,7 +37,7 @@ def _split_chatai_client_refresh(p2, p3):
 
 
 def _normalize_mailbox_email(email):
-    value = str(email or "").strip().lstrip("\ufeff")
+    value = str(email or "").strip().lstrip("\ufeff").replace(r"\@", "@")
     if "@+" in value:
         local, suffix = value.split("@+", 1)
         suffix_lower = suffix.lower()
