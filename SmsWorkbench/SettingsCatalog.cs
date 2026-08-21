@@ -102,9 +102,10 @@ namespace SmsWorkbench
                     Text("sub2api_group_ids", "分组ID", "sub2api.group_ids"),
                     Text("sub2api_proxy", "远端代理", "sub2api.proxy_name"),
                     Text("sub2api_proxy_id", "代理ID", "sub2api.proxy_id"),
-                    Integer("sub2api_priority", "优先级", "sub2api.priority"),
-                    Integer("sub2api_concurrency", "账号并发", "sub2api.concurrency"),
-                    Options("sub2api_auth_mode", "凭据模式", "sub2api.auth_mode", "auto", "auto", "oauth", "agent_identity"),
+                    Integer("sub2api_priority", "优先级", "sub2api.priority", "1"),
+                    Integer("sub2api_concurrency", "账号并发", "sub2api.concurrency", "49"),
+                    Integer("sub2api_rate_multiplier", "倍率", "sub2api.rate_multiplier", "1"),
+                    Options("sub2api_auth_mode", "凭据模式", "sub2api.auth_mode", "oauth", "auto", "oauth", "agent_identity"),
                     Boolean("sub2api_verify_after_import", "导入后连通测试", "sub2api.verify_after_import", true))),
 
             Category("网络与支付",

@@ -23,6 +23,20 @@ from .storage import mark_sub2api_import
 
 
 DEFAULT_GROUP_NAME = "codex"
+DEFAULT_SUB2API_MODEL_MAPPING = {
+    "codex-auto-review": "codex-auto-review",
+    "gpt-5.4": "gpt-5.4",
+    "gpt-5.4-mini": "gpt-5.4-mini",
+    "gpt-5.5": "gpt-5.5",
+    "gpt-5.6": "gpt-5.6",
+    "gpt-5.6-sol": "gpt-5.6-sol",
+    "gpt-5.6-terra": "gpt-5.6-terra",
+}
+DEFAULT_SUB2API_EXTRA = {
+    "privacy_mode": "training_off",
+    "openai_long_context_billing_enabled": True,
+    "codex_fingerprint_mode": "full",
+}
 
 
 def import_sub2api_session(
@@ -331,6 +345,9 @@ def upload_to_sub2api(
     proxy_id=None,
     priority=None,
     concurrency=None,
+    rate_multiplier=None,
+    credential_extras=None,
+    extra=None,
     verify_after_import=True,
 ):
     if not origin:
@@ -355,6 +372,9 @@ def upload_to_sub2api(
         proxy_id=resolved_proxy_id,
         priority=priority,
         concurrency=concurrency,
+        rate_multiplier=rate_multiplier,
+        credential_extras=credential_extras,
+        extra=extra,
     )
     response = _request_json(origin, "/api/v1/admin/accounts/import/codex-session", token=token, method="POST", body=payload)
     if not response.get("ok"):
@@ -574,7 +594,16 @@ def fetch_sub2api_auth_files(api_url="", api_token="", login_email="", login_pas
     }
 
 
-def _build_sub2api_payload(token_data, group_ids=None, proxy_id=None, priority=None, concurrency=None):
+def _build_sub2api_payload(
+    token_data,
+    group_ids=None,
+    proxy_id=None,
+    priority=None,
+    concurrency=None,
+    rate_multiplier=None,
+    credential_extras=None,
+    extra=None,
+):
     identity = token_data.get("agent_identity") if isinstance(token_data.get("agent_identity"), dict) else {}
     email = str(token_data.get("email") or identity.get("email") or "").strip()
     payload = {
@@ -583,6 +612,10 @@ def _build_sub2api_payload(token_data, group_ids=None, proxy_id=None, priority=N
         "auto_pause_on_expired": True,
         "update_existing": True,
     }
+    if isinstance(credential_extras, dict) and credential_extras:
+        payload["credential_extras"] = credential_extras
+    if isinstance(extra, dict) and extra:
+        payload["extra"] = extra
     if email:
         payload["name"] = email
     expires_at = _extract_expires_at(token_data)
@@ -594,6 +627,9 @@ def _build_sub2api_payload(token_data, group_ids=None, proxy_id=None, priority=N
     resolved_concurrency = _as_int(concurrency)
     if resolved_concurrency >= 0:
         payload["concurrency"] = resolved_concurrency
+    resolved_rate_multiplier = _as_float(rate_multiplier, default=-1)
+    if resolved_rate_multiplier >= 0:
+        payload["rate_multiplier"] = resolved_rate_multiplier
     resolved_proxy_id = _as_int(proxy_id)
     if resolved_proxy_id > 0:
         payload["proxy_id"] = resolved_proxy_id
@@ -618,6 +654,15 @@ def _resolve_sub2api_config(
     legacy = CFG.get("sub2api_mode") if isinstance(CFG.get("sub2api_mode"), dict) else {}
     source = {**legacy, **section}
     resolved_group_ids = group_ids if group_ids is not None else source.get("group_ids") or source.get("group_id")
+    configured_mapping = source.get("model_mapping")
+    model_mapping = dict(DEFAULT_SUB2API_MODEL_MAPPING)
+    if isinstance(configured_mapping, dict):
+        model_mapping.update({str(key): str(value) for key, value in configured_mapping.items() if str(key)})
+    credential_extras = dict(source.get("credential_extras") or {}) if isinstance(source.get("credential_extras"), dict) else {}
+    credential_extras["model_mapping"] = model_mapping
+    extra = dict(DEFAULT_SUB2API_EXTRA)
+    if isinstance(source.get("extra"), dict):
+        extra.update(source["extra"])
     return {
         "origin": _normalize_sub2api_origin(
             api_url
@@ -634,8 +679,11 @@ def _resolve_sub2api_config(
         "proxy_name": str(proxy_name or source.get("proxy_name") or source.get("default_proxy_name") or "").strip(),
         "proxy_id": proxy_id if proxy_id is not None else source.get("proxy_id"),
         "priority": priority if priority is not None else source.get("priority", 1),
-        "concurrency": concurrency if concurrency is not None else source.get("concurrency", 10),
-        "auth_mode": _normalize_auth_mode(auth_mode or source.get("auth_mode") or "auto"),
+        "concurrency": concurrency if concurrency is not None else source.get("concurrency", 49),
+        "rate_multiplier": _as_float(source.get("rate_multiplier"), default=1.0),
+        "credential_extras": credential_extras,
+        "extra": extra,
+        "auth_mode": _normalize_auth_mode(auth_mode or source.get("auth_mode") or "oauth"),
         "verify_after_import": _as_bool(
             verify_after_import if verify_after_import is not None else source.get("verify_after_import"),
             default=True,
@@ -910,6 +958,13 @@ def _as_int(value):
         return int(value)
     except Exception:
         return 0
+
+
+def _as_float(value, default=0.0):
+    try:
+        return float(value)
+    except Exception:
+        return float(default)
 
 
 def _as_bool(value, default=False):

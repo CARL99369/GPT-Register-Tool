@@ -159,6 +159,7 @@ namespace SmsWorkbench
             Tasks.Add(task);
             ScrollTaskGridToBottom();
             DateTime started = DateTime.Now;
+            var terminalEvents = new List<BackendProgressEvent>();
             AccountBatchProgressTracker accountProgress = string.IsNullOrWhiteSpace(progressDomain)
                 ? null
                 : new AccountBatchProgressTracker(progressDomain, progressTotal);
@@ -181,6 +182,8 @@ namespace SmsWorkbench
             {
                 if (BackendProgressEventParser.TryParse(line.Text, out BackendProgressEvent progressEvent))
                 {
+                    if (progressEvent.Terminal && !string.IsNullOrWhiteSpace(progressEvent.AccountRef))
+                        terminalEvents.Add(progressEvent);
                     if (accountProgress != null
                         && string.Equals(progressEvent.Domain, accountProgress.Domain, StringComparison.OrdinalIgnoreCase))
                     {
@@ -222,7 +225,24 @@ namespace SmsWorkbench
                 StatusText = taskName + " 已结束";
                 RefreshPools();
                 ScrollTaskGridToBottom();
-                if (taskName.StartsWith("账号测活", StringComparison.OrdinalIgnoreCase))
+                BackendBatchReport report = BackendBatchReportBuilder.TryBuild(
+                    taskName,
+                    result,
+                    new DateTimeOffset(started),
+                    DateTimeOffset.Now,
+                    terminalEvents);
+                if (report != null)
+                {
+                    string reportPath = BackendBatchReportStore.Save(rootDir, report);
+                    task.Info = report.Summary;
+                    Log($"任务报告：{report.Summary}，{reportPath}");
+                    await BackendBatchReportDialog.ShowAsync(
+                        this,
+                        report,
+                        reportPath,
+                        path => fileLauncher?.Open(path));
+                }
+                else if (taskName.StartsWith("账号测活", StringComparison.OrdinalIgnoreCase))
                 {
                     string output;
                     lock (backendOutputLock)

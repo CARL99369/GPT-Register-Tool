@@ -106,19 +106,49 @@ class Sub2ApiImportTests(unittest.TestCase):
             group_ids=[7],
             proxy_id=9,
             priority=1,
-            concurrency=10,
+            concurrency=49,
+            rate_multiplier=1,
+            credential_extras={
+                "model_mapping": {
+                    "gpt-5.6-sol": "gpt-5.6-sol",
+                    "gpt-5.6-terra": "gpt-5.6-terra",
+                },
+            },
+            extra={
+                "privacy_mode": "training_off",
+                "openai_long_context_billing_enabled": True,
+                "codex_fingerprint_mode": "full",
+            },
         )
 
         self.assertEqual(payload["name"], "paid@example.com")
         self.assertEqual(payload["group_ids"], [7])
         self.assertEqual(payload["proxy_id"], 9)
         self.assertEqual(payload["priority"], 1)
-        self.assertEqual(payload["concurrency"], 10)
+        self.assertEqual(payload["concurrency"], 49)
+        self.assertEqual(payload["rate_multiplier"], 1.0)
+        self.assertEqual(payload["credential_extras"]["model_mapping"]["gpt-5.6-sol"], "gpt-5.6-sol")
+        self.assertEqual(payload["extra"]["privacy_mode"], "training_off")
+        self.assertTrue(payload["extra"]["openai_long_context_billing_enabled"])
+        self.assertEqual(payload["extra"]["codex_fingerprint_mode"], "full")
         self.assertTrue(payload["auto_pause_on_expired"])
         self.assertTrue(payload["update_existing"])
         content = json.loads(payload["content"])
         self.assertEqual(content["access_token"], "at_123")
         self.assertEqual(content["refresh_token"], "rt_123")
+
+    def test_sub2api_defaults_match_exported_oauth_account_template(self):
+        with patch.object(sub2api_import, "CFG", {"sub2api": {}}):
+            config = sub2api_import._resolve_sub2api_config()
+
+        self.assertEqual(config["priority"], 1)
+        self.assertEqual(config["concurrency"], 49)
+        self.assertEqual(config["rate_multiplier"], 1.0)
+        self.assertEqual(config["auth_mode"], "oauth")
+        self.assertEqual(config["extra"]["privacy_mode"], "training_off")
+        self.assertTrue(config["extra"]["openai_long_context_billing_enabled"])
+        self.assertEqual(config["extra"]["codex_fingerprint_mode"], "full")
+        self.assertIn("gpt-5.6", config["credential_extras"]["model_mapping"])
 
     def test_upload_to_sub2api_resolves_group_and_posts_import_endpoint(self):
         calls = []

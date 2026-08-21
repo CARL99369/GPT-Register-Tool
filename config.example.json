@@ -289,8 +289,23 @@
     "proxy_name": "",
     "proxy_id": "",
     "priority": 1,
-    "concurrency": 10,
-    "auth_mode": "auto",
+    "concurrency": 49,
+    "rate_multiplier": 1,
+    "auth_mode": "oauth",
+    "model_mapping": {
+      "codex-auto-review": "codex-auto-review",
+      "gpt-5.4": "gpt-5.4",
+      "gpt-5.4-mini": "gpt-5.4-mini",
+      "gpt-5.5": "gpt-5.5",
+      "gpt-5.6": "gpt-5.6",
+      "gpt-5.6-sol": "gpt-5.6-sol",
+      "gpt-5.6-terra": "gpt-5.6-terra"
+    },
+    "extra": {
+      "privacy_mode": "training_off",
+      "openai_long_context_billing_enabled": true,
+      "codex_fingerprint_mode": "full"
+    },
     "verify_after_import": true
   },
   "codex_oauth": {

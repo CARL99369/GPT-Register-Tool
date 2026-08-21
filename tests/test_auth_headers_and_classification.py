@@ -62,7 +62,7 @@ class AuthHeadersAndClassificationTests(unittest.TestCase):
         self.assertIn(f'v="{version}"', DEFAULT_SEC_CH_UA)
 
     def test_rotated_fingerprint_keeps_tls_and_client_hints_coherent(self):
-        cfg = {"mode": "rotate", "profiles": ["chrome124", "chrome131"]}
+        cfg = {"mode": "rotate", "profiles": ["chrome142", "chrome146"]}
         with patch.object(auth_headers, "_auth_fingerprint_config", return_value=cfg):
             first = auth_headers.select_auth_fingerprint(rotate=True)
             second = auth_headers.select_auth_fingerprint(rotate=True)
@@ -73,6 +73,17 @@ class AuthHeadersAndClassificationTests(unittest.TestCase):
         self.assertIn(f"Chrome/{version}.", headers["User-Agent"])
         self.assertIn(f'v="{version}"', headers["sec-ch-ua"])
         auth_headers._AUTH_FINGERPRINT_LOCAL.profile_name = AUTH_IMPERSONATE
+
+    def test_legacy_fingerprints_are_excluded_from_auth_rotation(self):
+        cfg = {
+            "mode": "rotate",
+            "profiles": ["chrome124", "chrome131", "chrome136", "chrome142"],
+        }
+
+        with patch.object(auth_headers, "_auth_fingerprint_config", return_value=cfg):
+            profiles = auth_headers._configured_auth_profiles()
+
+        self.assertEqual(profiles, ["chrome142"])
 
     def test_sentinel_fingerprint_matches_auth_profile(self):
         with patch.object(auth_headers, "current_auth_fingerprint", return_value={

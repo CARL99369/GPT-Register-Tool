@@ -73,6 +73,13 @@ public sealed class SettingsServiceTests
 
         SettingDefinition importMode = SettingsCatalog.AllFields.Single(field => field.Key == "sub2api_auth_mode");
         Assert.Contains("agent_identity", importMode.Options);
+        Assert.Equal("oauth", importMode.DefaultValue);
+
+        SettingDefinition concurrency = SettingsCatalog.AllFields.Single(field => field.Key == "sub2api_concurrency");
+        Assert.Equal("49", concurrency.DefaultValue);
+
+        SettingDefinition rateMultiplier = SettingsCatalog.AllFields.Single(field => field.Key == "sub2api_rate_multiplier");
+        Assert.Equal("1", rateMultiplier.DefaultValue);
     }
 
     [Fact]

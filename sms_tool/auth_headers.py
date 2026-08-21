@@ -12,6 +12,7 @@ from urllib.parse import urlparse
 
 
 AUTH_IMPERSONATE = "chrome146"
+MIN_AUTH_CHROME_VERSION = 142
 DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
 DEFAULT_SEC_CH_UA = '"Chromium";v="146", "Google Chrome";v="146", "Not.A/Brand";v="99"'
 AUTH_FINGERPRINT_PROFILES = {
@@ -155,8 +156,17 @@ def _configured_auth_profiles():
         supported = {item.value for item in BrowserType}
     except Exception:
         supported = {AUTH_IMPERSONATE}
-    names = [name for name in names if name in AUTH_FINGERPRINT_PROFILES and name in supported]
-    defaults = [name for name in AUTH_FINGERPRINT_PROFILES if name in supported]
+    def is_current(name: str) -> bool:
+        try:
+            return int(name.removeprefix("chrome")) >= MIN_AUTH_CHROME_VERSION
+        except ValueError:
+            return False
+
+    names = [
+        name for name in names
+        if name in AUTH_FINGERPRINT_PROFILES and name in supported and is_current(name)
+    ]
+    defaults = [name for name in AUTH_FINGERPRINT_PROFILES if name in supported and is_current(name)]
     return names or defaults or [AUTH_IMPERSONATE]
 
 
