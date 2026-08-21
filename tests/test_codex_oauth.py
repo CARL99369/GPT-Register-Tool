@@ -1,4 +1,5 @@
 import unittest
+import time
 from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
 
@@ -176,6 +177,48 @@ class CodexOauthTests(unittest.TestCase):
         new_oauth.assert_called_once()
         self.assertGreaterEqual(follow.call_count, 1)
         self.assertEqual(session.post.call_count, 2)
+
+    def test_transient_403_restart_is_not_blocked_by_stale_session_circuit(self):
+        session = Mock()
+        session.cookies.set = Mock()
+        session.post.side_effect = [
+            Mock(status_code=403, text="<title>Just a moment...</title> Cloudflare"),
+            Mock(status_code=200, text="{}"),
+        ]
+        session.get.side_effect = [
+            Mock(status_code=302, headers={"Location": "https://auth.openai.com/consent"}),
+            Mock(status_code=200, headers={}),
+            Mock(status_code=200, headers={}),
+        ]
+        session._openai_registration_circuit = {
+            "blocked_until": time.time() + 30,
+            "status_code": 403,
+            "retry_after": 30.0,
+        }
+        fresh_oauth = {
+            "auth_url": "https://auth.openai.com/oauth/authorize?fresh=1",
+            "state": "fresh",
+            "code_verifier": "v2",
+            "redirect_uri": "http://localhost",
+        }
+
+        with patch("sms_tool.codex_oauth._new_oauth_request", return_value=fresh_oauth), \
+             patch("sms_tool.codex_oauth._ensure_oauth_sentinel", return_value={"device_id": "fresh-did"}), \
+             patch("sms_tool.codex_oauth.load_cached_sentinel", return_value={}), \
+             patch("sms_tool.codex_oauth.attach_sentinel"), \
+             patch("sms_tool.codex_oauth._next_url", return_value="https://auth.openai.com/consent"), \
+             patch("sms_tool.codex_oauth._authorize_continue_retry_delay", return_value=0), \
+             patch("sms_tool.codex_oauth._finish_authorization", return_value={"ok": True, "tokens": {"access_token": "at"}}):
+            result = codex_oauth._login_and_exchange(
+                session=session,
+                oauth={"auth_url": "https://auth.openai.com/oauth/authorize?stale=1", "state": "stale"},
+                email="user@example.com",
+                data={"device_id": "did"},
+                current_url="https://auth.openai.com/authorize",
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertGreaterEqual(session.get.call_count, 1)
 
     def test_password_login_uses_password_verify_endpoint(self):
         session = Mock()

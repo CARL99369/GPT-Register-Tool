@@ -14,7 +14,7 @@ from .config import CFG
 from .codex_phone import complete_phone_verification
 from .codex_sentinel import attach_sentinel, import_cached_auth_cookies, import_cookie_header, load_cached_sentinel, with_sentinel
 from .auth_headers import auth_impersonate, openai_auth_headers_lower, select_auth_fingerprint
-from .http_client import request_with_retry
+from .http_client import clear_session_circuit, request_with_retry
 from .http_utils import _absolute_url
 from .mailbox import MailboxAccount, MailboxTokenExpiredError, _poll_email_otp, mailbox_has_inbox_credentials
 from . import mailbox_gmail
@@ -258,6 +258,11 @@ def _login_and_exchange(
                 return result
             print(f"[*] Session state invalid, restarting auth flow (attempt {restart_attempt + 1}/{max_restarts})")
 
+        # A recoverable auth 403 can open the HTTP session circuit before this
+        # deliberate OAuth rebuild. That circuit belongs to the stale auth
+        # state; retaining it prevents the fresh fingerprint/OAuth request from
+        # being sent at all. A new 403 will open a new bounded circuit.
+        clear_session_circuit(session)
         _clear_auth_session_cookies(session)
         select_auth_fingerprint(rotate=True)
         try:
