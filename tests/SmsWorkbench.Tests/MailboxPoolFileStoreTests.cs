@@ -124,14 +124,15 @@ public sealed class MailboxPoolFileStoreTests
             string target = Path.Combine(root, "mailbox_tokens.txt");
             string icloud = "user@icloud.com----https://mail.example/inbox/private-token";
             string chatai = "other@example.com----password----client-id----refresh-token";
+            string accountMfa = "mansion-mask\\@example.com----account-password----JBSWY3DPEHPK3PXP";
 
             (int imported, int skipped) = MailboxPoolFileStore.ImportSupportedLines(
                 target,
-                new[] { icloud, chatai, icloud, "invalid" });
+                new[] { icloud, chatai, accountMfa, icloud, "invalid" });
 
-            Assert.Equal(2, imported);
+            Assert.Equal(3, imported);
             Assert.Equal(2, skipped);
-            Assert.Equal(new[] { icloud, chatai }, File.ReadAllLines(target, Encoding.UTF8));
+            Assert.Equal(new[] { icloud, chatai, accountMfa }, File.ReadAllLines(target, Encoding.UTF8));
             Assert.False(File.ReadAllBytes(target).Take(3).SequenceEqual(new byte[] { 0xEF, 0xBB, 0xBF }));
         }
         finally

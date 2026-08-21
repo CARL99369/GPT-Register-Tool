@@ -137,6 +137,9 @@ namespace SmsWorkbench
 
         private static bool IsSupportedImportLine(string line)
         {
+            // Keep the import gate in sync with the format-aware parser. This
+            // includes three-part password + TOTP account lines.
+            if (MailboxLineParser.TryParse(line, out _)) return true;
             if (TryParseICloudUrlLine(line, out _, out _)) return true;
             string[] parts = line.Split(new[] { "----" }, 4, StringSplitOptions.None);
             return parts.Length >= 4;
