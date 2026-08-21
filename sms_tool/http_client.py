@@ -131,7 +131,12 @@ def request_with_retry(session, method, url, *, label="", attempts=None, retry_d
             response = caller(url, **attempt_kwargs)
             status_code = int(getattr(response, "status_code", 0) or 0)
             if status_code in {403, 429}:
-                retry_after = _retry_after_seconds(response, default=900.0 if status_code == 403 else 300.0)
+                retry_after = _retry_after_seconds(response, default=30.0 if status_code == 403 else 300.0)
+                # Auth 403s often carry a provider-wide Retry-After (for
+                # example 900s). Keep the per-session circuit short so one
+                # rejected session does not stall the desktop batch.
+                if status_code == 403:
+                    retry_after = min(retry_after, 30.0)
                 state = _session_circuit(session)
                 state.update({
                     "blocked_until": time.time() + retry_after,
