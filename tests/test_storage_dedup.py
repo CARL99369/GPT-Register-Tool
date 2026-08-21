@@ -114,6 +114,51 @@ class StorageDedupTests(unittest.TestCase):
         self.assertEqual(row["paypal_status"], "link_ready")
         self.assertNotIn("passwordless_email_otp_poll_timeout", row["raw_json"])
 
+    def test_sub2api_status_update_preserves_local_authorization_fields(self):
+        oauth_rt = "rt.1." + "A" * 96
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "accounts.sqlite3"
+            with patch.object(storage, "database_path", return_value=db_path):
+                self.assertTrue(storage.upsert_account({
+                    "email": "sub2@example.com",
+                    "success": True,
+                    "status": "registered",
+                    "access_token": "at-local",
+                    "oauth_refresh_token": oauth_rt,
+                    "refresh_token_status": "oauth_present",
+                    "totp_secret": "JBSWY3DPEHPK3PXP",
+                }))
+                self.assertTrue(storage.mark_sub2api_import("sub2@example.com", {
+                    "ok": True,
+                    "verified": True,
+                    "updated_at": 123,
+                }))
+                self.assertTrue(storage.upsert_account({
+                    "email": "sub2@example.com",
+                    "success": True,
+                    "status": "registered",
+                    "access_token": "at-local",
+                    "oauth_refresh_token": oauth_rt,
+                    "refresh_token_status": "oauth_present",
+                    "totp_secret": "JBSWY3DPEHPK3PXP",
+                }))
+                conn = storage._connect()
+                try:
+                    row = conn.execute(
+                        "SELECT status,access_token,oauth_refresh_token,refresh_token_status,totp_secret,raw_json "
+                        "FROM accounts WHERE email=?",
+                        ("sub2@example.com",),
+                    ).fetchone()
+                finally:
+                    conn.close()
+
+        self.assertEqual(row["status"], "registered")
+        self.assertEqual(row["access_token"], "at-local")
+        self.assertEqual(row["oauth_refresh_token"], oauth_rt)
+        self.assertEqual(row["refresh_token_status"], "oauth_present")
+        self.assertEqual(row["totp_secret"], "JBSWY3DPEHPK3PXP")
+        self.assertTrue(json.loads(row["raw_json"])["sub2api_import"]["ok"])
+
     def test_upsert_does_not_treat_mailbox_refresh_token_as_codex_rt(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "accounts.sqlite3"

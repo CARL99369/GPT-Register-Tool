@@ -19,7 +19,7 @@ from .agent_identity import (
 from .codex_export import build_codex_json
 from .config import CFG
 from .cpa_import import _load_cpa_source, _write_cpa_json
-from .storage import get_account_record, upsert_account
+from .storage import mark_sub2api_import
 
 
 DEFAULT_GROUP_NAME = "codex"
@@ -826,18 +826,7 @@ def _record_sub2api_import(email, path, upload_result, auth_mode=""):
     target_email = str(email or "").strip().lower()
     if not target_email:
         return
-    data = {}
-    record = get_account_record(target_email)
-    raw_json = str(record.get("raw_json") or "").strip()
-    if raw_json:
-        try:
-            parsed = json.loads(raw_json)
-            if isinstance(parsed, dict):
-                data.update(parsed)
-        except Exception:
-            pass
-    data.setdefault("email", target_email)
-    data["sub2api_import"] = {
+    import_result = {
         "ok": bool(upload_result.get("ok")),
         "path": path,
         "mode": upload_result.get("mode", ""),
@@ -850,8 +839,8 @@ def _record_sub2api_import(email, path, upload_result, auth_mode=""):
         "updated_at": int(time.time()),
     }
     if upload_result.get("error"):
-        data["sub2api_import"]["error"] = upload_result.get("error", "")
-    upsert_account(data, json_path=record.get("json_path", ""))
+        import_result["error"] = upload_result.get("error", "")
+    mark_sub2api_import(target_email, import_result)
 
 
 def _extract_expires_at(token_data):

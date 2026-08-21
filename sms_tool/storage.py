@@ -629,6 +629,22 @@ def upsert_account(
     conn = _connect(runtime_config=runtime_config)
     try:
         row["email"] = _resolve_account_email(conn, email)
+        existing = conn.execute(
+            "SELECT raw_json FROM accounts WHERE lower(email)=lower(?)",
+            (row["email"],),
+        ).fetchone()
+        if existing is not None:
+            try:
+                existing_snapshot = json.loads(existing["raw_json"] or "{}")
+            except Exception:
+                existing_snapshot = {}
+            if (
+                isinstance(existing_snapshot, dict)
+                and isinstance(existing_snapshot.get("sub2api_import"), dict)
+                and "sub2api_import" not in safe_snapshot
+            ):
+                safe_snapshot["sub2api_import"] = existing_snapshot["sub2api_import"]
+                row["raw_json"] = json.dumps(safe_snapshot, ensure_ascii=False, separators=(",", ":"))
         conn.execute(sql, row)
         conn.commit()
     finally:
@@ -913,6 +929,44 @@ def mark_paypal_status(email, status="completed", *, runtime_config: ConfigInput
             WHERE lower(email)=lower(?)
             """,
             (status, now, now, raw_json, lookup_email),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    if json_path:
+        _update_session_json(json_path, data)
+    return True
+
+
+def mark_sub2api_import(email, import_result, *, runtime_config: ConfigInput = None):
+    """Update SUB2API metadata without replacing local account credentials."""
+    init_database(runtime_config=runtime_config)
+    now = int(time.time())
+    conn = _connect(runtime_config=runtime_config)
+    json_path = ""
+    data = {}
+    try:
+        lookup_email = _find_existing_account_email(conn, email)
+        if not lookup_email:
+            return False
+        row = conn.execute(
+            "SELECT raw_json,json_path FROM accounts WHERE lower(email)=lower(?)",
+            (lookup_email,),
+        ).fetchone()
+        if row is None:
+            return False
+        json_path = str(row["json_path"] or "").strip()
+        try:
+            data = json.loads(row["raw_json"] or "{}")
+        except Exception:
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        data["sub2api_import"] = dict(import_result or {})
+        encoded = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+        conn.execute(
+            "UPDATE accounts SET updated_at=?, raw_json=? WHERE lower(email)=lower(?)",
+            (now, encoded, lookup_email),
         )
         conn.commit()
     finally:
